@@ -50,19 +50,21 @@ GemGate прячет реальный `GEMINI_API_KEY` на сервере и в
 
 Главный экран показывает live-статус, успешность запросов, ошибки, p95 latency, in-flight запросы, rate-limit события, объем трафика и краткий тренд за последние минуты.
 
-![GemGate TUI overview](docs/assets/tui-overview.svg)
+![GemGate TUI overview](docs/assets/tui-overview.png)
 
 ### Logs
 
 Экран логов предназначен для быстрой диагностики: фильтры `all / warn / errors / auth`, таблица запросов, статус, latency, bytes out, path и detail выбранной строки.
 
-![GemGate TUI logs](docs/assets/tui-logs.svg)
+![GemGate TUI logs](docs/assets/tui-logs.png)
 
 ### Clients и Routes
 
 `Clients` помогает видеть нагрузку по токенам и лимитам. `Routes` показывает расклад по OpenAI-compatible, Gemini native и operational endpoints, а также быстрые URL для SDK и curl.
 
-![GemGate TUI clients and routes](docs/assets/tui-clients-routes.svg)
+![GemGate TUI clients](docs/assets/tui-clients-routes.png)
+
+![GemGate TUI routes](docs/assets/tui-routes.png)
 
 ## Быстрый старт
 
