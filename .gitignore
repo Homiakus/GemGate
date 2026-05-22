@@ -1,0 +1,50 @@
+# Local secrets and runtime config
+config.yaml
+config.*.yaml
+!.config.example.yaml
+!.config*.example.yaml
+*.env
+.env
+.env.*
+
+# Go build outputs
+bin/
+dist/
+build/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+
+# Go workspace and vendored deps generated locally
+go.work
+go.work.sum
+vendor/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.sock
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.cache/

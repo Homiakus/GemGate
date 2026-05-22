@@ -1,0 +1,119 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GemGate TUI clients and routes screens">
+  <title>GemGate TUI clients and routes screens</title>
+  <style>
+    .bg { fill: #0b1020; }
+    .screen { fill: #060b16; stroke: #263244; stroke-width: 2; }
+    .panel { fill: #101827; stroke: #344055; stroke-width: 2; }
+    .tab { fill: #1f2937; }
+    .tab-active { fill: #6d28d9; }
+    .head { fill: #0f172a; }
+    .row-alt { fill: #111c2f; }
+    .text { fill: #dbeafe; font: 15px Consolas, 'Liberation Mono', monospace; }
+    .small { fill: #94a3b8; font: 13px Consolas, 'Liberation Mono', monospace; }
+    .accent { fill: #5eead4; font: 700 15px Consolas, 'Liberation Mono', monospace; }
+    .title { fill: #f8fafc; font: 700 22px Consolas, 'Liberation Mono', monospace; }
+    .ok { fill: #86efac; font: 700 15px Consolas, 'Liberation Mono', monospace; }
+    .warn { fill: #fbbf24; font: 700 15px Consolas, 'Liberation Mono', monospace; }
+    .code { fill: #fde68a; font: 15px Consolas, 'Liberation Mono', monospace; }
+    .label { fill: #c4b5fd; font: 700 14px Consolas, 'Liberation Mono', monospace; }
+  </style>
+  <rect class="bg" width="1200" height="720" rx="18"/>
+
+  <rect x="34" y="34" width="548" height="652" rx="14" class="screen"/>
+  <circle cx="62" cy="60" r="6" fill="#ef4444"/>
+  <circle cx="84" cy="60" r="6" fill="#f59e0b"/>
+  <circle cx="106" cy="60" r="6" fill="#22c55e"/>
+  <text x="58" y="112" class="title">GemGate</text>
+  <text x="176" y="110" class="small">LIVE   listen :8080</text>
+
+  <rect x="58" y="136" width="104" height="30" rx="4" class="tab"/>
+  <text x="72" y="156" class="text">1 Overview</text>
+  <rect x="164" y="136" width="74" height="30" rx="4" class="tab"/>
+  <text x="178" y="156" class="text">2 Logs</text>
+  <rect x="240" y="136" width="112" height="30" rx="4" class="tab-active"/>
+  <text x="254" y="156" class="title">3 Clients</text>
+  <rect x="354" y="136" width="94" height="30" rx="4" class="tab"/>
+  <text x="368" y="156" class="text">4 Routes</text>
+
+  <rect x="58" y="190" width="490" height="396" rx="10" class="panel"/>
+  <text x="82" y="224" class="accent">Clients and usage</text>
+  <text x="82" y="250" class="small">Per-client rate limits are enforced in-memory per process.</text>
+  <rect x="82" y="278" width="442" height="34" rx="4" class="head"/>
+  <text x="98" y="300" class="label">Client</text>
+  <text x="232" y="300" class="label">State</text>
+  <text x="322" y="300" class="label">RPM</text>
+  <text x="398" y="300" class="label">Req</text>
+  <text x="462" y="300" class="label">Error</text>
+
+  <text x="98" y="338" class="text">local-dev</text>
+  <text x="232" y="338" class="ok">enabled</text>
+  <text x="322" y="338" class="text">120</text>
+  <text x="398" y="338" class="text">128</text>
+  <text x="462" y="338" class="warn">2.3%</text>
+
+  <rect x="82" y="358" width="442" height="32" rx="3" class="row-alt"/>
+  <text x="98" y="380" class="text">ci-runner</text>
+  <text x="232" y="380" class="ok">enabled</text>
+  <text x="322" y="380" class="text">60</text>
+  <text x="398" y="380" class="text">44</text>
+  <text x="462" y="380" class="text">0.0%</text>
+
+  <text x="98" y="422" class="text">dashboard</text>
+  <text x="232" y="422" class="ok">enabled</text>
+  <text x="322" y="422" class="text">unlim</text>
+  <text x="398" y="422" class="text">21</text>
+  <text x="462" y="422" class="text">0.0%</text>
+
+  <rect x="82" y="466" width="442" height="80" rx="7" fill="#0f172a"/>
+  <text x="98" y="496" class="small">Recommended: issue one token per app/user.</text>
+  <text x="98" y="524" class="small">Use rate_limit_rpm to protect billing and quotas.</text>
+
+  <text x="58" y="632" class="small">3 clients   r refresh   space/p pause   ? help</text>
+
+  <rect x="618" y="34" width="548" height="652" rx="14" class="screen"/>
+  <circle cx="646" cy="60" r="6" fill="#ef4444"/>
+  <circle cx="668" cy="60" r="6" fill="#f59e0b"/>
+  <circle cx="690" cy="60" r="6" fill="#22c55e"/>
+  <text x="642" y="112" class="title">GemGate</text>
+  <text x="760" y="110" class="small">LIVE   route summary</text>
+
+  <rect x="642" y="136" width="104" height="30" rx="4" class="tab"/>
+  <text x="656" y="156" class="text">1 Overview</text>
+  <rect x="748" y="136" width="74" height="30" rx="4" class="tab"/>
+  <text x="762" y="156" class="text">2 Logs</text>
+  <rect x="824" y="136" width="112" height="30" rx="4" class="tab"/>
+  <text x="838" y="156" class="text">3 Clients</text>
+  <rect x="938" y="136" width="94" height="30" rx="4" class="tab-active"/>
+  <text x="952" y="156" class="title">4 Routes</text>
+
+  <rect x="642" y="190" width="490" height="396" rx="10" class="panel"/>
+  <text x="666" y="224" class="accent">Routes</text>
+  <rect x="666" y="250" width="442" height="34" rx="4" class="head"/>
+  <text x="682" y="272" class="label">Route</text>
+  <text x="852" y="272" class="label">Req</text>
+  <text x="910" y="272" class="label">Error</text>
+  <text x="994" y="272" class="label">Avg</text>
+
+  <text x="682" y="312" class="text">OpenAI compat</text>
+  <text x="852" y="312" class="text">96</text>
+  <text x="910" y="312" class="warn">1.0%</text>
+  <text x="994" y="312" class="text">812ms</text>
+
+  <rect x="666" y="332" width="442" height="32" rx="3" class="row-alt"/>
+  <text x="682" y="354" class="text">Gemini native</text>
+  <text x="852" y="354" class="text">28</text>
+  <text x="910" y="354" class="text">0.0%</text>
+  <text x="994" y="354" class="text">604ms</text>
+
+  <text x="682" y="394" class="text">Metrics</text>
+  <text x="852" y="394" class="text">16</text>
+  <text x="910" y="394" class="text">0.0%</text>
+  <text x="994" y="394" class="text">3ms</text>
+
+  <rect x="666" y="432" width="442" height="112" rx="7" fill="#0f172a"/>
+  <text x="682" y="462" class="accent">Quick starts</text>
+  <text x="682" y="492" class="code">OpenAI base URL: http://localhost:8080/v1beta/openai/</text>
+  <text x="682" y="520" class="code">Metrics: curl /_metrics -H "Authorization: Bearer $GEMGATE_TOKEN"</text>
+
+  <text x="642" y="632" class="small">4 routes   SDK base URL   protected operational endpoints</text>
+</svg>

@@ -1,0 +1,10 @@
+services:
+  gemgate:
+    build: .
+    container_name: gemgate
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      GEMGATE_TOKEN: "${GEMGATE_TOKEN}"
