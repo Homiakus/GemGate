@@ -228,7 +228,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 			g.metrics.AuthFailures.Add(1)
 			recordStatus(g.metrics, http.StatusUnauthorized)
 			g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "operations", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "operations auth failed"})
-			w.Header().Set("WWW-Authenticate", `Bearer realm="gemgate-operations"`)
+			w.Header().Set("WWW-Authenticate", operationsAuthChallenge())
 			http.Error(w, "invalid operations token", http.StatusUnauthorized)
 			return
 		}
