@@ -44,6 +44,11 @@ func (g *Gateway) proxy(state runtimeSnapshot, w http.ResponseWriter, r *http.Re
 	}
 	req.ContentLength = contentLength
 	copyRequestHeaders(req.Header, r.Header)
+	clientIP := resolveClientIP(state.cfg, r)
+	if clientIP != "" {
+		req.Header.Set("X-Forwarded-For", clientIP)
+		req.Header.Set("X-Real-IP", clientIP)
+	}
 	req.Header.Set("X-Request-ID", reqID)
 	req.Header.Set("X-GemGate-Client", clientName)
 	req.Header.Set("X-GemGate-Provider", p.name)
@@ -176,6 +181,7 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 			"listen":             state.cfg.Config.Server.Listen,
 			"public_health":      state.cfg.Config.Server.PublicHealth,
 			"request_body_limit": state.cfg.Config.Server.RequestBodyLimit,
+			"trusted_proxies":    append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
 			"cors": map[string]any{
 				"enabled":           state.cfg.Config.Server.CORS.IsEnabled(),
 				"allowed_origins":   append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
