@@ -197,6 +197,9 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r, span := startGatewaySpan(r)
+	defer span.End()
+
 	state := g.currentRuntime()
 	if state.cors != nil && state.cors.handle(w, r) {
 		return
@@ -207,24 +210,30 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	reqID := requestID(r)
+	traceRequestID(r.Context(), reqID)
 	clientIP := resolveClientIP(state.cfg, r)
 	w.Header().Set("X-Request-ID", reqID)
 
 	if r.URL.Path == "/_healthz" && state.cfg.Config.Server.PublicHealth {
+		traceAuth(r.Context(), "public_operations", "")
 		g.writeHealth(state, w)
 		return
 	}
 	if r.URL.Path == "/_readyz" && state.cfg.Config.Server.PublicHealth {
+		traceAuth(r.Context(), "public_operations", "")
 		g.writeReadiness(state, w)
 		return
 	}
 	if r.Method == http.MethodOptions {
+		traceHTTPStatus(r.Context(), http.StatusNoContent)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	if isOperationalPath(r.URL.Path) {
 		if !operationsAuthorized(state, r) {
+			traceAuth(r.Context(), "operations", "")
+			traceHTTPStatus(r.Context(), http.StatusUnauthorized)
 			g.metrics.AuthFailures.Add(1)
 			recordStatus(g.metrics, http.StatusUnauthorized)
 			g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "operations", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "operations auth failed"})
@@ -232,15 +241,18 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 			http.Error(w, "invalid operations token", http.StatusUnauthorized)
 			return
 		}
+		traceAuth(r.Context(), "operations", "")
 		switch r.URL.Path {
 		case "/_healthz":
 			g.writeHealth(state, w)
 		case "/_readyz":
 			g.writeReadiness(state, w)
 		case "/_metrics":
+			traceHTTPStatus(r.Context(), http.StatusOK)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			_, _ = w.Write([]byte(g.Metrics().Prometheus()))
 		case "/_config":
+			traceHTTPStatus(r.Context(), http.StatusOK)
 			writeJSON(w, http.StatusOK, safeConfig(state))
 		}
 		return
@@ -248,17 +260,22 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 
 	auth, token, ok := authenticate(state, r)
 	if !ok {
+		traceAuth(r.Context(), "application", "")
+		traceHTTPStatus(r.Context(), http.StatusUnauthorized)
 		g.metrics.AuthFailures.Add(1)
 		recordStatus(g.metrics, http.StatusUnauthorized)
 		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "anonymous", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "auth failed"})
 		http.Error(w, "invalid proxy token", http.StatusUnauthorized)
 		return
 	}
+	traceAuth(r.Context(), "application", auth.Name)
+	traceRateLimit(r.Context(), g.rateLimits.Name(), auth.RateLimitRPM)
 
 	decision, limitErr := g.rateLimits.Allow(r.Context(), token, auth.RateLimitRPM, time.Now())
 	if limitErr != nil {
 		g.metrics.RateLimitBackendErrors.Add(1)
 		if !decision.Allowed {
+			traceHTTPStatus(r.Context(), http.StatusServiceUnavailable)
 			recordStatus(g.metrics, http.StatusServiceUnavailable)
 			g.logs.Add(LogEntry{Time: start, Level: "error", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusServiceUnavailable, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable: " + limitErr.Error()})
 			http.Error(w, "rate limit backend unavailable", http.StatusServiceUnavailable)
@@ -267,6 +284,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable; fail-open allowed request: " + limitErr.Error()})
 	}
 	if !decision.Allowed {
+		traceHTTPStatus(r.Context(), http.StatusTooManyRequests)
 		g.metrics.RateLimited.Add(1)
 		recordStatus(g.metrics, http.StatusTooManyRequests)
 		if decision.RetryAfter > 0 {
@@ -292,6 +310,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 			http.Error(w, publicProxyError(result.status), result.status)
 		}
 	}
+	traceProxyResult(r.Context(), result, err, clientAborted)
 	if !clientAborted {
 		recordStatus(g.metrics, result.status)
 	}
