@@ -34,6 +34,15 @@ var upstreamCredentialHeaders = map[string]struct{}{
 	"anthropic-version":   {},
 }
 
+var forwardingHeaders = map[string]struct{}{
+	"forwarded":         {},
+	"x-forwarded-for":   {},
+	"x-forwarded-host":  {},
+	"x-forwarded-port":  {},
+	"x-forwarded-proto": {},
+	"x-real-ip":         {},
+}
+
 func copyRequestHeaders(dst, src http.Header) {
 	connectionHeaders := connectionHeaderNames(src)
 	for k, values := range src {
@@ -45,6 +54,9 @@ func copyRequestHeaders(dst, src http.Header) {
 			continue
 		}
 		if _, secret := upstreamCredentialHeaders[lk]; secret {
+			continue
+		}
+		if _, forwarding := forwardingHeaders[lk]; forwarding {
 			continue
 		}
 		for _, v := range values {
@@ -76,7 +88,6 @@ func connectionHeaderNames(h http.Header) map[string]struct{} {
 			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
 				out[name] = struct{}{}
 			}
-		}
 	}
 	return out
 }
