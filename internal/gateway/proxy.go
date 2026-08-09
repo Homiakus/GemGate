@@ -37,7 +37,7 @@ func (g *Gateway) proxy(state runtimeSnapshot, w http.ResponseWriter, r *http.Re
 	upstreamURL.Path = singleJoiningSlash(p.baseURL.Path, strings.TrimPrefix(targetPath, "/"))
 	upstreamURL.RawQuery = r.URL.RawQuery
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL.String(), body)
+	req, err := http.NewRequestWithContext(tagDownstreamContext(r.Context()), r.Method, upstreamURL.String(), body)
 	if err != nil {
 		result.status = http.StatusInternalServerError
 		return result, fmt.Errorf("build upstream request: %w", err)
