@@ -1,8 +1,8 @@
 # GemGate
 
-Multi-provider AI API gateway на Go: серверные provider keys, отдельные клиентские tokens, streaming passthrough, atomic hot reload, distributed rate limiting, circuit breakers, Prometheus и Charm TUI.
+Multi-provider AI API gateway на Go: серверные provider keys, отдельные application/operations tokens, streaming passthrough, atomic hot reload, distributed rate limiting, circuit breakers, Prometheus и Charm TUI.
 
-GemGate ставится между приложениями и AI-провайдерами. Клиент знает только свой GemGate bearer token; реальные provider credentials остаются на сервере. Gateway выбирает upstream, удаляет входные provider-auth headers, добавляет серверную авторизацию и проксирует provider-native payload/stream без искусственной трансляции схем.
+GemGate ставится между приложениями и AI-провайдерами. Приложение знает только свой GemGate bearer token; реальные provider credentials остаются на сервере. Gateway выбирает upstream, удаляет входные provider-auth headers, добавляет серверную авторизацию и проксирует provider-native payload/stream без искусственной трансляции схем.
 
 GemGate **не** обходит provider quota/billing/safety rules и **не** делает скрытые retry/failover генерации.
 
@@ -11,7 +11,8 @@ GemGate **не** обходит provider quota/billing/safety rules и **не** 
 - несколько AI providers в одном процессе через `/providers/{name}/...`;
 - root-route через `default_provider` для обратной совместимости;
 - built-in provider auth adapters + generic OpenAI-compatible/custom endpoints;
-- file-backed provider/client secrets и live rotation;
+- отдельный dedicated operations token для control-plane endpoints;
+- file-backed provider/client/operations secrets и live rotation;
 - immutable runtime snapshots и validation-before-swap hot reload;
 - SSE/streaming passthrough с корректным early flush;
 - downstream cancellation, отделённый от provider timeout/failure;
@@ -28,32 +29,35 @@ GemGate **не** обходит provider quota/billing/safety rules и **не** 
 ## Архитектура
 
 ```text
-Client / SDK
-    │ GemGate bearer token
-    ▼
-CORS + trusted-proxy boundary
-    ▼
-Immutable runtime snapshot
-    ├── client auth
-    ├── rate-limit policy ──► memory | Redis shared backend
-    ├── provider router + auth adapter
-    └── request/body policy
-              │
-              ▼
-        circuit breaker
-              │
-              ▼
-       metrics transport
-              │
-              ▼
-          AI provider
+Application client                    Operator / Prometheus
+      │ client bearer                        │ operations bearer
+      └──────────────┬───────────────────────┘
+                     ▼
+          CORS + trusted-proxy boundary
+                     ▼
+          Immutable runtime snapshot
+            ├── client auth
+            ├── operations auth
+            ├── rate-limit policy ──► memory | Redis
+            ├── provider router + auth adapter
+            └── request/body policy
+                         │
+                         ▼
+                   circuit breaker
+                         │
+                         ▼
+                  metrics transport
+                         │
+                         ▼
+                    AI provider
 ```
 
 Ключевые пакеты:
 
-- `internal/config` — strict YAML, defaults, secrets, CORS, trusted proxies, Redis/circuit validation;
+- `internal/config` — strict YAML, defaults, secrets, operations auth, CORS, trusted proxies, Redis/circuit validation;
 - `internal/provider` — provider catalog и auth contract;
 - `internal/gateway/runtime.go` — immutable snapshots и atomic reload;
+- `internal/gateway/operations_auth.go` — control-plane credential boundary;
 - `internal/gateway/proxy.go` — routing/auth/streaming;
 - `internal/gateway/ratelimit*.go` — memory/Redis rolling quota;
 - `internal/gateway/circuitbreaker.go` — closed/open/half-open state machine;
@@ -110,12 +114,6 @@ Hot reload по умолчанию проверяет config/secrets кажды�
 gemgate serve -config config.yaml -reload-interval 5s
 ```
 
-Отключить polling:
-
-```bash
-gemgate serve -config config.yaml -reload-interval 0
-```
-
 ## Минимальная конфигурация
 
 ```yaml
@@ -124,7 +122,7 @@ server:
   read_timeout: "30s"
   write_timeout: "0s"
   idle_timeout: "120s"
-  public_health: true
+  public_health: false
   request_body_limit: "32MiB"
   trusted_proxies: []
   cors:
@@ -134,6 +132,9 @@ server:
     allowed_headers: ["Authorization", "Content-Type", "X-Request-ID"]
     allow_credentials: false
     max_age: "10m"
+
+operations:
+  token_file: "/run/secrets/gemgate_operations_token"
 
 rate_limit:
   backend: memory
@@ -163,9 +164,30 @@ logging:
 
 `write_timeout: "0s"` и provider `timeout: "0s"` подходят для long-lived model streams. `logging.log_body` / `logging.log_headers` могут оставаться только `false`; `true` намеренно отклоняется.
 
-## Маршрутизация
+## Application и operations auth
 
-Named route:
+Application client использует:
+
+```http
+Authorization: Bearer <GEMGATE_TOKEN>
+```
+
+Этот token может проксировать AI-запросы и не пересылается provider. Provider auth создаётся заново из server-side config.
+
+Для production рекомендуется отдельный control-plane token:
+
+```yaml
+operations:
+  token_file: "/run/secrets/gemgate_operations_token"
+```
+
+После его настройки `/_metrics`, `/_config` и приватные health/readiness требуют **operations token**. Application token получает `401`, а operations token, в свою очередь, получает `401` на обычном provider route и не может инициировать billable AI request.
+
+`operations.token`/`token_file` hot-reloadable; совпадение operations token с enabled client token отклоняется. Если `operations:` отсутствует, старые client tokens продолжают авторизовывать protected operational endpoints для backward compatibility.
+
+Подробнее: [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+## Маршрутизация
 
 ```text
 /providers/{provider-name}/{provider-path}
@@ -186,36 +208,9 @@ POST /providers/together/chat/completions
 
 Пути без `/providers/...` идут в `default_provider`.
 
-Клиент всегда авторизуется в GemGate:
-
-```http
-Authorization: Bearer <GEMGATE_TOKEN>
-```
-
-Этот token не пересылается provider. Provider auth создаётся заново из server-side config.
-
 ## Secrets и hot reload
 
-Provider key:
-
-```yaml
-providers:
-  - name: openai
-    type: openai
-    api_key_file: "/run/secrets/openai_api_key"
-```
-
-Client token:
-
-```yaml
-clients:
-  - name: backend
-    token_file: "/run/secrets/gemgate_backend_token"
-    enabled: true
-    rate_limit_rpm: 120
-```
-
-Candidate config полностью загружается, резолвит secret files, применяет defaults и проходит validation. Только после этого активный runtime заменяется целиком. Некорректная ревизия не частично применяется.
+Поддерживаются file-backed provider keys, application tokens и operations token. Candidate config полностью загружается, резолвит secret files, применяет defaults и проходит validation; только после этого runtime заменяется целиком.
 
 Уже начатый streaming request заканчивается на старом snapshot; новые requests после swap используют новый.
 
@@ -223,6 +218,7 @@ Hot-reloadable:
 
 - providers/default provider, keys, URLs, headers, timeouts, circuit policy;
 - client token/enabled/RPM;
+- operations token/token_file;
 - trusted proxies;
 - CORS;
 - request body limit;
@@ -235,16 +231,14 @@ Restart-required:
 
 ## Rate limiting
 
-### Один процесс
+Single process:
 
 ```yaml
 rate_limit:
   backend: memory
 ```
 
-`memory` — default: exact rolling 60-second window без fixed-window double burst.
-
-### Несколько replicas
+Multiple replicas:
 
 ```yaml
 rate_limit:
@@ -256,15 +250,11 @@ rate_limit:
     fail_open: false
 ```
 
-Redis backend использует atomic Lua operation и Redis server time, поэтому две независимые GemGate replicas видят одну quota. Redis key строится из SHA-256-derived client identifier; raw bearer token в key не записывается.
-
-По умолчанию Redis failure — **fail-closed**: GemGate отвечает локальным `503` и не вызывает AI provider. `fail_open: true` — отдельное осознанное решение, при котором запрос разрешается, а backend error логируется и увеличивает `gemgate_rate_limit_backend_errors_total`.
+Redis backend использует atomic Lua operation и Redis server time, поэтому независимые GemGate replicas видят одну quota. Raw bearer token не записывается в Redis key. По умолчанию backend fail-closed: при Redis outage GemGate возвращает local `503` и не вызывает AI provider.
 
 Redis URL/credentials не выводятся в `/_config` или TUI. Подробнее: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md).
 
 ## Circuit breaker
-
-Каждый provider может иметь собственную policy:
 
 ```yaml
 circuit_breaker:
@@ -273,13 +263,7 @@ circuit_breaker:
   open_for: "30s"
 ```
 
-- transport errors и HTTP 5xx считаются failures;
-- 4xx/429 circuit не открывают;
-- при threshold circuit становится `open`;
-- open requests получают local `503`, `Retry-After`, `X-GemGate-Circuit: open` без upstream call;
-- после cooldown допускается ровно один `half_open` probe;
-- успешный probe закрывает circuit;
-- **automatic retries/replay отсутствуют**.
+Transport errors и HTTP 5xx считаются failures; 4xx/429 circuit не открывают. Open requests получают local `503` без upstream call. После cooldown допускается один `half_open` probe. Automatic retries/replay отсутствуют.
 
 Downstream cancellation не считается provider failure; provider/network timeout считается.
 
@@ -292,22 +276,20 @@ server:
     - "10.0.0.0/8"
 ```
 
-GemGate доверяет forwarded IP только через явно доверенную цепочку. Spoofed `X-Forwarded-For` от обычного клиента игнорируется. Перед upstream исходные forwarding headers удаляются и формируются заново из вычисленного client IP.
+Spoofed `X-Forwarded-For` от недоверенного peer игнорируется. Перед upstream forwarding headers очищаются и формируются заново из вычисленного client IP.
 
 Подробнее: [`docs/TRUSTED_PROXIES.md`](docs/TRUSTED_PROXIES.md).
 
 ## Operational endpoints
 
-| Endpoint | Auth | Назначение |
+| Endpoint | При dedicated operations auth | Назначение |
 | --- | --- | --- |
-| `/_healthz` | public при `public_health: true`, иначе bearer | liveness + passive provider summary |
-| `/_readyz` | public при `public_health: true`, иначе bearer | passive readiness default provider |
-| `/_metrics` | bearer | Prometheus |
-| `/_config` | bearer | redacted runtime config |
+| `/_healthz` | public при `public_health: true`, иначе operations token | liveness + passive provider summary |
+| `/_readyz` | public при `public_health: true`, иначе operations token | passive readiness default provider |
+| `/_metrics` | operations token | Prometheus |
+| `/_config` | operations token | redacted runtime config |
 
-`/_readyz` не делает synthetic provider calls и не расходует quota.
-
-Prometheus включает global/provider/circuit series и `gemgate_rate_limit_backend_errors_total`.
+`/_readyz` не делает synthetic provider calls и не расходует quota. Без configured `operations:` protected endpoints сохраняют legacy client-token fallback.
 
 ## TUI
 
@@ -317,48 +299,31 @@ Views:
 2. **Logs** — client/provider/IP-aware request log;
 3. **Clients** — usage и RPM policy;
 4. **Providers** — health, circuit, requests, errors, duration;
-5. **Config** — redacted provider + rate-limit/CORS configuration;
+5. **Config** — redacted providers, rate-limit/CORS и operations-auth mode;
 6. **Help**.
 
-Управление: `1-6`, `Tab`, `Shift+Tab`, `r`, `space/p`, `a/w/e/u`, `?`, `q`.
+## CI и releases
 
-## CI и тестирование
+Каждый push/PR проходит modules, gofmt, vet, `go test -race -cover ./...`, build, real Redis integration и cross-platform release packaging smoke.
 
-Каждый push/PR проходит:
+Tag `vX.Y.Z` собирает Linux/macOS/Windows для amd64/arm64, генерирует SHA-256 checksums и SPDX SBOM, создаёт GitHub artifact attestations и публикует GitHub Release.
 
-```bash
-go mod verify
-gofmt
-go vet ./...
-go test -race -cover ./...
-go build ./cmd/gemgate
-```
-
-CI поднимает реальный Redis service. Integration suite проверяет shared quota между двумя limiter instances, Redis fail-open semantics, secret-safe config, SSE early flush, streaming lifetime, cancellation propagation и provider timeout classification.
-
-Тот же CI вызывает `scripts/build-release.sh` и cross-compiles Linux/macOS/Windows для amd64/arm64, после чего запускает Linux release binary и проверяет injected version.
-
-## Releases
-
-Tag `vX.Y.Z` запускает `.github/workflows/release.yml`. Workflow проверяет source, собирает архивы тем же build-script, генерирует SPDX JSON SBOM и `checksums.txt`, создаёт GitHub artifact attestations и публикует GitHub Release.
-
-Подробности и команды проверки: [`docs/RELEASING.md`](docs/RELEASING.md).
+Подробнее: [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Production checklist
 
-- Terminate TLS на reverse proxy/load balancer/private ingress.
-- Используйте отдельный GemGate token для каждого consumer.
+- Используйте отдельный operations token и отдельный application token для каждого consumer.
 - Предпочитайте file-backed/orchestrator secrets.
-- Для multi-replica quota используйте Redis backend; держите `fail_open: false`, если quota защищает расходы.
+- Terminate TLS на trusted reverse proxy/load balancer/private ingress.
+- Для multi-replica quota используйте Redis backend и fail-closed policy, если quota защищает расходы.
 - Используйте `rediss://` или private network для удалённого Redis.
 - Настройте `trusted_proxies` только для контролируемой proxy-chain.
 - Настройте CORS явно или отключите его для server-only deployment.
-- Используйте `/_healthz` для liveness и `/_readyz` для passive readiness.
-- Не включайте body/header logging — чувствительный capture намеренно отсутствует.
+- Не включайте body/header logging.
 - Ограничьте egress для custom provider URLs.
 - Не воспринимайте circuit breaker как retry/failover engine.
 
-Security: [`SECURITY.md`](SECURITY.md) · Audit: [`docs/AUDIT.md`](docs/AUDIT.md) · Providers: [`docs/PROVIDERS.md`](docs/PROVIDERS.md) · Rate limiting: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md) · Releases: [`docs/RELEASING.md`](docs/RELEASING.md)
+Security: [`SECURITY.md`](SECURITY.md) · Audit: [`docs/AUDIT.md`](docs/AUDIT.md) · Operations: [`docs/OPERATIONS.md`](docs/OPERATIONS.md) · Providers: [`docs/PROVIDERS.md`](docs/PROVIDERS.md) · Rate limiting: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md) · Releases: [`docs/RELEASING.md`](docs/RELEASING.md)
 
 ## Лицензия
 
