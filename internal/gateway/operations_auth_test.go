@@ -32,6 +32,9 @@ func TestDedicatedOperationsAuthSeparatesControlAndDataPlane(t *testing.T) {
 	if clientConfigResp.Code != http.StatusUnauthorized {
 		t.Fatalf("client token should not access control plane: status=%d", clientConfigResp.Code)
 	}
+	if got := clientConfigResp.Header().Get("WWW-Authenticate"); got != `Bearer realm="gemgate-operations"` {
+		t.Fatalf("WWW-Authenticate = %q", got)
+	}
 
 	opsConfig := httptest.NewRequest(http.MethodGet, "/_config", nil)
 	opsConfig.Header.Set("Authorization", "Bearer operations-secret")
