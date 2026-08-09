@@ -36,6 +36,32 @@ Properties:
 - entries expire automatically after the rolling window and do not require explicit token cleanup;
 - a rejected request receives `429` and `Retry-After` computed from the oldest event still inside the shared window.
 
+## Redis Sentinel failover
+
+GemGate automatically switches the Redis client to go-redis Sentinel failover mode when the configured URL contains a non-empty `master_name` query parameter.
+
+Example secret file content:
+
+```text
+redis://sentinel-1.internal:26379/0?master_name=gemgate-master&addr=sentinel-2.internal%3A26379&addr=sentinel-3.internal%3A26379
+```
+
+No extra `rate_limit.backend` value is required: it remains `redis`. The same rolling-window Lua script runs against the master selected by Sentinel. When Sentinel promotes a new master, the go-redis failover client resolves the new master instead of pinning GemGate to one Redis node.
+
+Use at least three Sentinel processes in a production quorum topology. GemGate seed URLs may include multiple `addr=` values so the client is not dependent on one Sentinel seed.
+
+The failover URL follows the native go-redis `ParseFailoverURL` contract. If Sentinel and Redis data nodes require authentication, keep the full URL in `url_file`; do not place those credentials in repository YAML. TLS Sentinel deployments should use `rediss://` and a certificate-valid hostname.
+
+GemGate deliberately does not implement its own leader election or Redis failover state machine. Sentinel ownership stays in Redis/go-redis; GemGate only consumes the active-master abstraction.
+
+## Managed Redis
+
+For a managed Redis service that exposes one stable primary endpoint, use the normal standalone URL supplied by the service. Provider-side replication/failover remains transparent to GemGate.
+
+Use Sentinel mode only when the service actually exposes Redis Sentinel semantics. Do not add `master_name` merely because the managed service is highly available.
+
+For cluster-sharded Redis, verify that the deployment supports the Lua + sorted-set workload and keeps each GemGate limiter key on a single authoritative shard. GemGate currently uses a single-node/failover `redis.Client` abstraction rather than Redis Cluster routing; native Redis Cluster support should be treated as a separate feature, not assumed from Sentinel support.
+
 ## Redis credentials
 
 Redis URLs may contain usernames/passwords. Prefer `url_file` over committing a credential-bearing URL to `config.yaml`:
@@ -77,12 +103,23 @@ Hot-reloadable:
 Restart-required:
 
 - `rate_limit.backend`;
-- Redis URL / URL file;
+- Redis/Sentinel URL / URL file;
 - Redis key prefix;
 - Redis timeout;
 - Redis fail-open policy.
 
 The backend is process infrastructure rather than request-snapshot state. Requiring restart avoids partially replacing a shared Redis client while requests are in flight.
+
+## Failure drills
+
+Before relying on Redis as a spend boundary, exercise the actual production topology:
+
+1. stop the active Redis primary and verify Sentinel/managed failover restores limiter requests;
+2. isolate one Sentinel seed and verify another seed can resolve the master;
+3. make Redis entirely unreachable and verify `fail_open: false` produces local `503` with zero AI-provider calls;
+4. repeat with `fail_open: true` only if that is the explicit production policy and verify the backend-error metric/alerts;
+5. rotate Redis credentials and confirm the planned process restart succeeds before retiring the old credentials;
+6. verify NTP/host clock changes do not affect quota semantics because Redis `TIME`, not GemGate wall clock, owns the shared window.
 
 ## Testing
 
@@ -92,4 +129,8 @@ Repository CI starts a real Redis service and verifies under `go test -race` tha
 2. different tokens remain isolated;
 3. fail-open behavior is explicit;
 4. raw bearer tokens never appear in limiter keys;
-5. Redis connection credentials are absent from the redacted config surface.
+5. Redis connection credentials are absent from the redacted config surface;
+6. normal URLs select standalone Redis mode;
+7. failover URLs with `master_name` select go-redis Sentinel mode and malformed failover options are rejected before serving traffic.
+
+A full Sentinel promotion test belongs in deployment/integration infrastructure rather than the fast unit CI path; production failure drills above remain required for a specific HA topology.
