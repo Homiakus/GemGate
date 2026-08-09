@@ -95,17 +95,28 @@ func run(withTUI bool, args []string) error {
 		return err
 	}
 
+	// Reserve the application port before any UI or HTTP goroutine starts. This
+	// makes bind failures synchronous and lets us reserve the operations port too
+	// before exposing either trust domain.
+	applicationListener, err := net.Listen("tcp", gw.Addr())
+	if err != nil {
+		_ = gw.Shutdown(context.Background())
+		return fmt.Errorf("listen application endpoint %q: %w", gw.Addr(), err)
+	}
+
 	var operationsServer *http.Server
 	var operationsListener net.Listener
 	operationsAddr := strings.TrimSpace(*operationsListen)
 	if operationsAddr != "" {
 		if operationsAddr == strings.TrimSpace(rt.Config.Server.Listen) {
-			_ = shutdown(gw, nil)
+			_ = applicationListener.Close()
+			_ = gw.Shutdown(context.Background())
 			return fmt.Errorf("operations-listen must differ from server.listen")
 		}
 		operationsListener, err = net.Listen("tcp", operationsAddr)
 		if err != nil {
-			_ = shutdown(gw, nil)
+			_ = applicationListener.Close()
+			_ = gw.Shutdown(context.Background())
 			return fmt.Errorf("listen operations endpoint %q: %w", operationsAddr, err)
 		}
 		gw.IsolateOperationsEndpoints()
@@ -120,13 +131,13 @@ func run(withTUI bool, args []string) error {
 		}
 	}
 
-	// All handler composition and listener binding is complete before either
-	// server starts accepting requests. This avoids an isolation window/data race.
+	// Both listeners are now bound and handler composition is immutable for the
+	// serving lifetime. Only now do requests start being accepted.
 	serverErr := make(chan error, 2)
-	go func() { serverErr <- gw.ListenAndServe() }()
+	go func() { serverErr <- gw.Serve(applicationListener) }()
 	if operationsServer != nil {
 		go func() {
-			log.Printf("operations listener on %s", operationsAddr)
+			log.Printf("operations listener on %s", operationsListener.Addr().String())
 			err := operationsServer.Serve(operationsListener)
 			if errors.Is(err, http.ErrServerClosed) {
 				err = nil
@@ -154,7 +165,7 @@ func run(withTUI bool, args []string) error {
 
 	printRuntimeInfo(gw.ConfigSnapshot())
 	if operationsServer != nil {
-		fmt.Printf("Operations listener: %s (operational paths removed from application port)\n", operationsServer.Addr)
+		fmt.Printf("Operations listener: %s (operational paths removed from application port)\n", operationsListener.Addr().String())
 	}
 	if *reloadInterval > 0 {
 		fmt.Printf("Hot reload: every %s (invalid revisions are rejected atomically)\n", reloadInterval.String())
@@ -282,6 +293,7 @@ Operations isolation:
   -operations-listen <addr> starts a separate listener for /_healthz, /_readyz,
   /_metrics and /_config. Those paths then return 404 on the application listener.
   Application/provider routes always return 404 on the operations listener.
+  Both ports are bound before either listener starts accepting requests.
 
 Hot reload:
   Provider/client/CORS/trusted-proxy policy is validated and swapped atomically.
