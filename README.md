@@ -30,10 +30,11 @@ GemGate **не** пытается превращать разные API в од�
 | Credential isolation | Клиентские provider-auth headers не проходят upstream. |
 | Provider auth adapters | Bearer, Gemini native/OpenAI mode, Anthropic `x-api-key`, no-auth/custom endpoints. |
 | Streaming passthrough | SSE и другие streaming responses идут по мере поступления. |
+| Cancellation isolation | Downstream cancel не считается отказом провайдера и не открывает circuit breaker. |
 | Sliding-window rate limit | Точное rolling one-minute окно без fixed-window double burst. |
-| Circuit breaker | После серии transport/5xx failures проблемный provider временно отсоединяется без retry запросов. |
+| Configurable circuit breaker | `enabled`, `failure_threshold`, `open_for` отдельно для каждого provider, hot-reloadable. |
 | Passive readiness | `/_readyz` учитывает circuit state default provider без synthetic provider calls. |
-| Provider observability | Requests, 2xx/4xx/5xx, transport errors, in-flight, duration и passive health. |
+| Provider observability | Requests, 2xx/4xx/5xx, transport errors, in-flight, duration, circuit и passive health. |
 | Prometheus | Global + provider-labelled metrics на `/_metrics`. |
 | Configurable CORS | Disable switch, allow-list, preflight validation, credentials policy и max-age. |
 | Charm TUI | Overview, Logs, Clients, Providers, Config и Help. |
@@ -66,13 +67,14 @@ Immutable runtime snapshot
 
 Runtime и HTTP-часть разделены по ответственности:
 
-- `internal/config` — strict YAML, environment expansion, file-backed secrets, defaults и validation;
+- `internal/config` — strict YAML, environment expansion, file-backed secrets, circuit policies, defaults и validation;
 - `internal/provider` — provider catalog и auth contract;
 - `internal/gateway/gateway.go` — lifecycle и request coordination;
 - `internal/gateway/runtime.go` — immutable snapshots и atomic reload;
 - `internal/gateway/proxy.go` — routing/auth/upstream streaming;
-- `internal/gateway/circuitbreaker.go` — provider circuit state machine;
-- `internal/gateway/readiness.go` — passive readiness;
+- `internal/gateway/request_context.go` — разделение downstream cancellation и provider timeout;
+- `internal/gateway/circuitbreaker.go` — snapshot-scoped provider circuit state machine;
+- `internal/gateway/readiness.go` / `health.go` — passive readiness и liveness;
 - `internal/gateway/http_helpers.go` — HTTP/redaction helpers;
 - `internal/tui` — presentation поверх gateway snapshots;
 - `cmd/gemgate` — CLI, watcher и process lifecycle.
@@ -157,6 +159,10 @@ providers:
     type: gemini
     api_key: "${GEMINI_API_KEY}"
     timeout: "0s"
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      open_for: "30s"
 
 clients:
   - name: local-dev
@@ -196,7 +202,7 @@ clients:
 
 Без restart можно менять:
 
-- providers: состав, `default_provider`, `base_url`, key/file, headers, provider timeout;
+- providers: состав, `default_provider`, `base_url`, key/file, headers, provider timeout и circuit policy;
 - clients: token/file, enabled, RPM limit;
 - CORS policy;
 - `request_body_limit`;
@@ -220,6 +226,9 @@ providers:
   - name: openai
     type: openai
     api_key_file: "/run/secrets/openai_api_key"
+    circuit_breaker:
+      failure_threshold: 5
+      open_for: "30s"
 
   - name: claude
     type: anthropic
@@ -232,6 +241,8 @@ providers:
   - name: local
     type: openai-compatible
     base_url: "http://127.0.0.1:11434/v1"
+    circuit_breaker:
+      enabled: false
 ```
 
 ## Маршрутизация
@@ -300,18 +311,35 @@ server:
 
 Breaker защищает upstream и budget от повторного шторма при явно падающем provider, но **не повторяет пользовательские запросы**.
 
-Текущая policy:
+Политика задаётся отдельно для каждого provider:
+
+```yaml
+providers:
+  - name: openai
+    type: openai
+    api_key_file: "/run/secrets/openai_api_key"
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      open_for: "30s"
+```
+
+Если блок не задан, используются defaults `enabled: true`, `failure_threshold: 5`, `open_for: 30s`.
+
+Поведение:
 
 - failure = transport error или HTTP 5xx;
 - HTTP 4xx/429 circuit не открывают;
-- после 5 последовательных failures circuit переходит в `open`;
-- open period — 30 секунд;
+- при достижении `failure_threshold` circuit переходит в `open`;
 - пока circuit открыт, GemGate отвечает локальным `503 Service Unavailable`, `Retry-After` и `X-GemGate-Circuit: open`, не вызывая upstream;
-- после cooldown пропускается ровно один `half_open` probe;
-- успешный probe закрывает circuit, неуспешный открывает его ещё на 30 секунд;
-- никаких automatic retries generation requests нет.
+- после `open_for` пропускается ровно один `half_open` probe;
+- успешный probe закрывает circuit, неуспешный открывает его ещё на `open_for`;
+- никаких automatic retries generation requests нет;
+- `enabled: false` полностью отключает breaker для конкретного provider.
 
-Circuit state привязан к provider observability и сохраняется при обычном config reload того же provider name.
+Circuit policy hot-reloadable. Breaker принадлежит immutable runtime snapshot: новый snapshot клонирует текущее состояние под новую policy, а уже начатые streaming requests продолжают жить со старым breaker/policy до завершения.
+
+Downstream cancellation не считается provider failure. Provider/network timeout, при котором исходный downstream context остаётся активным, считается transport failure.
 
 ## Observability и health
 
@@ -319,14 +347,14 @@ Circuit state привязан к provider observability и сохраняетс
 
 | Endpoint | Auth | Назначение |
 | --- | --- | --- |
-| `/_healthz` | public при `public_health: true`, иначе обычный route policy | process liveness + passive provider health summary |
+| `/_healthz` | public при `public_health: true`, иначе GemGate bearer token | process liveness + passive provider health summary |
 | `/_readyz` | public при `public_health: true`, иначе GemGate bearer token | passive readiness по circuit state default provider |
 | `/_metrics` | GemGate bearer token | Prometheus metrics |
-| `/_config` | GemGate bearer token | redacted runtime config |
+| `/_config` | GemGate bearer token | redacted runtime config + provider circuit policy |
 
-`/_healthz` остаётся liveness endpoint и не падает только потому, что upstream деградировал.
+`/_healthz` всегда локальный endpoint и остаётся liveness: он не падает только потому, что upstream деградировал.
 
-`/_readyz` — **passive readiness**. Он не делает synthetic provider calls и не расходует quota. Если circuit default provider `open` или `half_open`, endpoint возвращает `503`; проблемы только named/non-default provider не снимают весь gateway с readiness.
+`/_readyz` — **passive readiness**. Он не делает synthetic provider calls и не расходует quota. Если circuit default provider `open` или `half_open`, endpoint возвращает `503`; проблемы named/non-default provider не снимают весь gateway с readiness. Если breaker default provider намеренно `disabled`, readiness не блокируется breaker state.
 
 Provider health telemetry:
 
@@ -346,6 +374,8 @@ gemgate_provider_transport_errors_total{provider="openai"}
 gemgate_provider_request_duration_seconds_sum{provider="openai"}
 gemgate_provider_request_duration_seconds_count{provider="openai"}
 gemgate_provider_consecutive_failures{provider="openai"}
+gemgate_provider_circuit_state{provider="openai",state="closed"}
+gemgate_provider_circuit_retry_after_seconds{provider="openai"}
 ```
 
 Provider duration измеряется до EOF/Close response body, поэтому streaming lifetime учитывается целиком.
@@ -354,11 +384,11 @@ Provider duration измеряется до EOF/Close response body, поэто�
 
 Разделы:
 
-1. **Overview** — traffic, p95, rate limits и provider health;
+1. **Overview** — traffic, p95, rate limits и provider/circuit attention;
 2. **Logs** — provider-aware request log;
 3. **Clients** — usage и RPM limits;
-4. **Providers** — type, default role, health, requests, errors, in-flight и duration;
-5. **Config** — redacted runtime config и CORS;
+4. **Providers** — type, default role, health, circuit state, requests, errors, in-flight и duration;
+5. **Config** — redacted runtime config, CORS и provider circuit policies;
 6. **Help** — controls и operational notes.
 
 Управление: `1-6`, `Tab`, `Shift+Tab`, `r`, `space/p`, `a/w/e/u`, `?`, `q`.
@@ -374,7 +404,7 @@ upstream:
   timeout: "0s"
 ```
 
-`upstream.api_key_file` также поддерживается.
+`upstream.api_key_file` также поддерживается. Legacy provider получает стандартную circuit policy.
 
 ## Docker / systemd
 
@@ -389,13 +419,14 @@ docker compose up --build
 ## Разработка
 
 ```bash
+go mod verify
 gofmt -w .
 go vet ./...
 go test -race -cover ./...
 go build ./cmd/gemgate
 ```
 
-GitHub Actions выполняет эти проверки на каждом push и pull request.
+GitHub Actions выполняет эти проверки на каждом push и pull request. Integration suite дополнительно проверяет ранний SSE flush, streaming lifetime metrics, downstream cancellation propagation и provider timeout classification.
 
 ## Production checklist
 
@@ -404,7 +435,7 @@ GitHub Actions выполняет эти проверки на каждом push
 - Предпочитайте file-backed/orchestrator secrets для live rotation.
 - Явно настройте CORS или отключите его.
 - Ограничьте `rate_limit_rpm`, если compromised client может создать расходы.
-- Помните: circuit breaker предотвращает новый upstream call, но не делает retry/failover автоматически.
+- Подберите circuit policy по latency/error characteristics provider; не используйте breaker как retry/failover engine.
 - Используйте `/_healthz` для liveness, `/_readyz` для passive readiness.
 - Ограничьте egress для custom `base_url`.
 - Оставляйте request/response bodies вне логов по умолчанию.
