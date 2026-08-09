@@ -60,12 +60,23 @@ func newRedisRateLimitBackend(cfg config.RedisRateLimitConfig, timeout time.Dura
 	}, nil
 }
 
-func newRedisRateLimitClient(redisURL string, timeout time.Duration) (*redis.Client, string, error) {
+func redisRateLimitMode(redisURL string) string {
 	u, err := url.Parse(redisURL)
 	if err != nil {
-		return nil, "", err
+		return "invalid"
 	}
 	if u.Query().Get("master_name") != "" {
+		return "sentinel"
+	}
+	return "standalone"
+}
+
+func newRedisRateLimitClient(redisURL string, timeout time.Duration) (*redis.Client, string, error) {
+	mode := redisRateLimitMode(redisURL)
+	if mode == "invalid" {
+		return nil, "", fmt.Errorf("invalid Redis URL")
+	}
+	if mode == "sentinel" {
 		opts, err := redis.ParseFailoverURL(redisURL)
 		if err != nil {
 			return nil, "", fmt.Errorf("parse Redis Sentinel failover URL: %w", err)
@@ -76,7 +87,7 @@ func newRedisRateLimitClient(redisURL string, timeout time.Duration) (*redis.Cli
 		opts.DialTimeout = timeout
 		opts.ReadTimeout = timeout
 		opts.WriteTimeout = timeout
-		return redis.NewFailoverClient(opts), "sentinel", nil
+		return redis.NewFailoverClient(opts), mode, nil
 	}
 
 	opts, err := redis.ParseURL(redisURL)
@@ -86,7 +97,7 @@ func newRedisRateLimitClient(redisURL string, timeout time.Duration) (*redis.Cli
 	opts.DialTimeout = timeout
 	opts.ReadTimeout = timeout
 	opts.WriteTimeout = timeout
-	return redis.NewClient(opts), "standalone", nil
+	return redis.NewClient(opts), mode, nil
 }
 
 func (b *redisRateLimitBackend) Allow(ctx context.Context, key string, limit int, _ time.Time) (rateLimitDecision, error) {
