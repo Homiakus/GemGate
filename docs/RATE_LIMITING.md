@@ -54,6 +54,8 @@ The failover URL follows the native go-redis `ParseFailoverURL` contract. If Sen
 
 GemGate deliberately does not implement its own leader election or Redis failover state machine. Sentinel ownership stays in Redis/go-redis; GemGate only consumes the active-master abstraction.
 
+The repository has a dedicated `Redis Sentinel E2E` workflow. It starts a Redis master, replica and three Sentinel processes, writes limiter state, forces `SENTINEL FAILOVER`, waits for a different master, then verifies that the **same** GemGate failover client reconnects and sees the pre-promotion quota state on the promoted replica.
+
 ## Managed Redis
 
 For a managed Redis service that exposes one stable primary endpoint, use the normal standalone URL supplied by the service. Provider-side replication/failover remains transparent to GemGate.
@@ -70,7 +72,7 @@ Redis URLs may contain usernames/passwords. Prefer `url_file` over committing a 
 rediss://user:password@redis.internal.example:6379/0
 ```
 
-`/_config` and the TUI expose only the backend name, whether Redis is configured, key prefix, timeout and fail-open policy. The Redis URL and credentials are intentionally omitted.
+`/_config` and the TUI expose only the backend name, `standalone`/`sentinel` mode, whether Redis is configured, key prefix, timeout and fail-open policy. The Redis URL and credentials are intentionally omitted.
 
 Use `rediss://` or a private trusted network when Redis traffic crosses a host/network boundary.
 
@@ -112,7 +114,7 @@ The backend is process infrastructure rather than request-snapshot state. Requir
 
 ## Failure drills
 
-Before relying on Redis as a spend boundary, exercise the actual production topology:
+CI now covers a real forced Sentinel promotion, but production topology still deserves failure drills because network policy, TLS, DNS, authentication and persistence differ from the test environment:
 
 1. stop the active Redis primary and verify Sentinel/managed failover restores limiter requests;
 2. isolate one Sentinel seed and verify another seed can resolve the master;
@@ -123,7 +125,7 @@ Before relying on Redis as a spend boundary, exercise the actual production topo
 
 ## Testing
 
-Repository CI starts a real Redis service and verifies under `go test -race` that:
+The normal CI starts a real standalone Redis service and verifies under `go test -race` that:
 
 1. two independent limiter instances see one shared quota for the same token;
 2. different tokens remain isolated;
@@ -133,4 +135,4 @@ Repository CI starts a real Redis service and verifies under `go test -race` tha
 6. normal URLs select standalone Redis mode;
 7. failover URLs with `master_name` select go-redis Sentinel mode and malformed failover options are rejected before serving traffic.
 
-A full Sentinel promotion test belongs in deployment/integration infrastructure rather than the fast unit CI path; production failure drills above remain required for a specific HA topology.
+The separate Sentinel workflow additionally verifies quorum discovery, forced master promotion, reconnection through the existing failover client and continuity of limiter state across promotion.
