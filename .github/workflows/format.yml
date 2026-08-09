@@ -1,16 +1,17 @@
-name: Format Go
+name: Normalize Go
 
 on:
   workflow_dispatch:
   push:
     paths:
       - ".github/workflows/format.yml"
+      - "go.mod"
 
 permissions:
   contents: write
 
 jobs:
-  gofmt:
+  normalize:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,17 +24,19 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
+      - name: Normalize modules
+        run: go mod tidy
       - name: Apply gofmt
         run: gofmt -w .
-      - name: Commit formatting if needed
+      - name: Commit normalization if needed
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "Repository is already gofmt-clean."
+            echo "Repository is already normalized."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- '*.go'
-          git commit -m "Apply canonical gofmt"
+          git add -- '*.go' go.mod go.sum
+          git commit -m "Normalize Go modules and formatting"
           git push origin HEAD:main
