@@ -29,10 +29,14 @@ func (t *providerMetricsTransport) RoundTrip(req *http.Request) (*http.Response,
 			seconds = 1
 		}
 		body := `{"error":"provider circuit open"}`
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
+		headers.Set("Retry-After", strconv.Itoa(seconds))
+		headers.Set("X-GemGate-Circuit", "open")
 		return &http.Response{
 			StatusCode:    http.StatusServiceUnavailable,
 			Status:        fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable)),
-			Header:        http.Header{"Content-Type": []string{"application/json"}, "Retry-After": []string{strconv.Itoa(seconds)}, "X-GemGate-Circuit": []string{"open"}},
+			Header:        headers,
 			Body:          io.NopCloser(strings.NewReader(body)),
 			ContentLength: int64(len(body)),
 			Request:       req,
