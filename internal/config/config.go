@@ -25,12 +25,26 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen           string `yaml:"listen"`
-	ReadTimeout      string `yaml:"read_timeout"`
-	WriteTimeout     string `yaml:"write_timeout"`
-	IdleTimeout      string `yaml:"idle_timeout"`
-	PublicHealth     bool   `yaml:"public_health"`
-	RequestBodyLimit string `yaml:"request_body_limit"`
+	Listen           string     `yaml:"listen"`
+	ReadTimeout      string     `yaml:"read_timeout"`
+	WriteTimeout     string     `yaml:"write_timeout"`
+	IdleTimeout      string     `yaml:"idle_timeout"`
+	PublicHealth     bool       `yaml:"public_health"`
+	RequestBodyLimit string     `yaml:"request_body_limit"`
+	CORS             CORSConfig `yaml:"cors,omitempty"`
+}
+
+type CORSConfig struct {
+	Enabled          *bool    `yaml:"enabled,omitempty"`
+	AllowedOrigins   []string `yaml:"allowed_origins,omitempty"`
+	AllowedMethods   []string `yaml:"allowed_methods,omitempty"`
+	AllowedHeaders   []string `yaml:"allowed_headers,omitempty"`
+	AllowCredentials bool     `yaml:"allow_credentials,omitempty"`
+	MaxAge           string   `yaml:"max_age,omitempty"`
+}
+
+func (c CORSConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 type UpstreamConfig struct {
@@ -69,6 +83,7 @@ type Runtime struct {
 	UpstreamTimeout  time.Duration // default provider timeout, kept for compatibility
 	ProviderTimeouts map[string]time.Duration
 	RequestBodyLimit int64
+	CORSMaxAge       time.Duration
 }
 
 var (
@@ -108,6 +123,9 @@ func Load(path string) (Runtime, error) {
 	if rt.RequestBodyLimit, err = parseBytes(cfg.Server.RequestBodyLimit); err != nil {
 		return Runtime{}, fmt.Errorf("server.request_body_limit: %w", err)
 	}
+	if rt.CORSMaxAge, err = parseDuration(cfg.Server.CORS.MaxAge); err != nil {
+		return Runtime{}, fmt.Errorf("server.cors.max_age: %w", err)
+	}
 	for _, p := range cfg.Providers {
 		d, parseErr := parseDuration(p.Timeout)
 		if parseErr != nil {
@@ -140,6 +158,35 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.RequestBodyLimit == "" {
 		cfg.Server.RequestBodyLimit = "32MiB"
+	}
+	if cfg.Server.CORS.Enabled == nil {
+		enabled := true
+		cfg.Server.CORS.Enabled = &enabled
+	}
+	if len(cfg.Server.CORS.AllowedOrigins) == 0 {
+		cfg.Server.CORS.AllowedOrigins = []string{"*"}
+	}
+	if len(cfg.Server.CORS.AllowedMethods) == 0 {
+		cfg.Server.CORS.AllowedMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	}
+	if len(cfg.Server.CORS.AllowedHeaders) == 0 {
+		cfg.Server.CORS.AllowedHeaders = []string{"Authorization", "Content-Type", "X-Request-ID"}
+	}
+	if cfg.Server.CORS.MaxAge == "" {
+		cfg.Server.CORS.MaxAge = "10m"
+	}
+	for i := range cfg.Server.CORS.AllowedOrigins {
+		origin := strings.TrimSpace(cfg.Server.CORS.AllowedOrigins[i])
+		if origin != "*" {
+			origin = strings.TrimSuffix(origin, "/")
+		}
+		cfg.Server.CORS.AllowedOrigins[i] = origin
+	}
+	for i := range cfg.Server.CORS.AllowedMethods {
+		cfg.Server.CORS.AllowedMethods[i] = strings.ToUpper(strings.TrimSpace(cfg.Server.CORS.AllowedMethods[i]))
+	}
+	for i := range cfg.Server.CORS.AllowedHeaders {
+		cfg.Server.CORS.AllowedHeaders[i] = strings.TrimSpace(cfg.Server.CORS.AllowedHeaders[i])
 	}
 	if cfg.Logging.Recent <= 0 {
 		cfg.Logging.Recent = 300
@@ -268,6 +315,62 @@ func validate(rt Runtime) error {
 	}
 	if rt.RequestBodyLimit < 0 {
 		return errors.New("request_body_limit must not be negative")
+	}
+	if err := validateCORS(cfg.Server.CORS, rt.CORSMaxAge); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCORS(cfg CORSConfig, maxAge time.Duration) error {
+	if !cfg.IsEnabled() {
+		return nil
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		return errors.New("server.cors.allowed_origins must not be empty when CORS is enabled")
+	}
+	wildcard := false
+	for _, origin := range cfg.AllowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			return errors.New("server.cors.allowed_origins contains an empty origin")
+		}
+		if origin == "*" {
+			wildcard = true
+			continue
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.cors.allowed_origins contains invalid origin %q", origin)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("server.cors.allowed_origins origin %q must use http or https", origin)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return fmt.Errorf("server.cors.allowed_origins origin %q must not contain a path", origin)
+		}
+	}
+	if wildcard && cfg.AllowCredentials {
+		return errors.New("server.cors.allow_credentials cannot be true with wildcard allowed_origins")
+	}
+	if len(cfg.AllowedMethods) == 0 {
+		return errors.New("server.cors.allowed_methods must not be empty when CORS is enabled")
+	}
+	for _, method := range cfg.AllowedMethods {
+		if strings.TrimSpace(method) == "" {
+			return errors.New("server.cors.allowed_methods contains an empty method")
+		}
+	}
+	if len(cfg.AllowedHeaders) == 0 {
+		return errors.New("server.cors.allowed_headers must not be empty when CORS is enabled")
+	}
+	for _, header := range cfg.AllowedHeaders {
+		if strings.TrimSpace(header) == "" {
+			return errors.New("server.cors.allowed_headers contains an empty header")
+		}
+	}
+	if maxAge < 0 {
+		return errors.New("server.cors.max_age must not be negative")
 	}
 	return nil
 }

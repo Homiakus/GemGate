@@ -36,6 +36,25 @@ func TestRateWindowResetsAfterMinute(t *testing.T) {
 	}
 }
 
+func TestRateWindowDoesNotDoubleBurstAcrossFixedBoundary(t *testing.T) {
+	w := &rateWindow{}
+	now := time.Unix(100, 0)
+
+	if ok, _ := w.allow(2, now); !ok {
+		t.Fatal("first request should be allowed")
+	}
+	if ok, _ := w.allow(2, now.Add(59*time.Second)); !ok {
+		t.Fatal("second request should be allowed")
+	}
+	if ok, reset := w.allow(2, now.Add(60*time.Second)); !ok || reset != 0 {
+		// The oldest request is exactly one minute old and is pruned, so one slot opens.
+		t.Fatalf("request at sliding boundary should be allowed, ok=%t reset=%s", ok, reset)
+	}
+	if ok, reset := w.allow(2, now.Add(60*time.Second+time.Millisecond)); ok || reset <= 0 {
+		t.Fatalf("next request should be limited by the still-recent 59s request, ok=%t reset=%s", ok, reset)
+	}
+}
+
 func TestGatewayRejectsOverClientRateLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

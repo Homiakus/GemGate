@@ -6,20 +6,23 @@ GemGate is intentionally a reverse proxy rather than an API-schema translator. I
 
 ```mermaid
 flowchart LR
-    C[Client / SDK] -->|GemGate bearer token| G[Gateway]
-    G --> A[Client auth + rate limit]
+    C[Client / SDK] --> X[CORS middleware]
+    X --> G[Gateway]
+    G --> A[Client auth + sliding-window rate limit]
     A --> R[Provider router]
     R --> P[Provider adapter]
-    P -->|provider-specific auth| U[(AI provider)]
-    G --> M[Metrics]
+    P --> PM[Provider metrics transport]
+    PM -->|provider-specific auth| U[(AI provider)]
+    G --> M[Global metrics]
     G --> L[In-memory log ring]
+    PM --> M
     M --> T[TUI / _metrics]
     L --> T
 ```
 
-- `internal/config` owns strict YAML parsing, environment expansion, defaults, validation, and legacy `upstream:` migration.
+- `internal/config` owns strict YAML parsing, environment expansion, defaults, validation, CORS policy, and legacy `upstream:` migration.
 - `internal/provider` is the provider catalog. It contains provider metadata and the smallest possible auth/header policy; it does not know about client tokens, rate limits, or TUI state.
-- `internal/gateway` owns HTTP routing, client authentication, rate limiting, upstream transport, streaming, redaction, operational endpoints, metrics, and logs.
+- `internal/gateway` owns HTTP routing, client authentication, rate limiting, CORS middleware, upstream transport, streaming, redaction, operational endpoints, metrics, and logs.
 - `internal/tui` is an observer/controller surface over gateway snapshots. It must not contain provider protocol logic.
 - `cmd/gemgate` is composition only: CLI parsing, setup, lifecycle, signal handling.
 
@@ -58,6 +61,42 @@ Adding a provider should normally require only one catalog entry in `internal/pr
 
 Provider-specific request/response transformations do **not** belong in the catalog. If schema translation is ever introduced, it should be a separate explicit adapter layer with its own tests and versioning contract.
 
+## CORS boundary
+
+CORS is handled before `Gateway.ServeHTTP`. This keeps browser-origin policy separate from provider routing and guarantees that provider responses cannot overwrite the configured policy.
+
+The policy supports:
+
+- complete disablement;
+- exact origin allow-lists or `*`;
+- allowed method/header validation for preflight;
+- optional credentials for exact origins;
+- configurable preflight max-age.
+
+Wildcard origins and credentialed CORS are rejected during config validation.
+
+## Rate limiting
+
+Per-client `rate_limit_rpm` uses an exact rolling one-minute window. This removes the fixed-window boundary case where a client could spend one full quota immediately before a minute boundary and another immediately after it.
+
+The limiter is still process-local. Multi-replica deployments that require a global quota need a shared backend; that is intentionally not hidden behind a misleading local counter.
+
+## Provider observability
+
+Every provider `http.Client` wraps the shared connection-pooled transport with a lightweight metrics transport. It holds provider in-flight state until the response body reaches EOF or is closed, so long streaming responses are represented correctly.
+
+Per-provider snapshots expose:
+
+- total and 2xx/4xx/5xx requests;
+- transport failures;
+- in-flight requests;
+- total/average/last duration;
+- last status/time;
+- consecutive transport/5xx failures;
+- passive `unknown` / `healthy` / `warning` / `degraded` state.
+
+`/_metrics` exports provider-labelled Prometheus series. `/_healthz` includes only the passive health state and never exposes provider URLs or credentials. It remains a process liveness endpoint rather than an active provider readiness probe.
+
 ## Timeout model
 
 Each provider owns an `http.Client` timeout. `0s` means no whole-request deadline, which is useful for long model generations and streaming. The underlying transport is shared to retain connection pooling.
@@ -76,3 +115,5 @@ upstream:
 ```
 
 At load time it is normalized into a single provider named `gemini`. New deployments should use `providers:` and `default_provider:`.
+
+For CORS, omitted settings preserve the previous behavior (`enabled: true`, `allowed_origins: ["*"]`) so existing configs continue to load. New production configs should prefer an explicit origin allow-list or disable CORS when browser access is not needed.

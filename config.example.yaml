@@ -6,6 +6,18 @@ server:
   public_health: true
   request_body_limit: "32MiB"
 
+  # Browser CORS policy. Non-browser/server-to-server clients are unaffected.
+  # Prefer an explicit allow-list in production. Set enabled: false if browsers
+  # never call GemGate directly.
+  cors:
+    enabled: true
+    allowed_origins:
+      - "http://localhost:3000"
+    allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    allowed_headers: ["Authorization", "Content-Type", "X-Request-ID"]
+    allow_credentials: false
+    max_age: "10m"
+
 default_provider: gemini
 
 providers:

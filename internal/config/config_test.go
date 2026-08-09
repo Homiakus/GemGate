@@ -95,6 +95,70 @@ clients:
 	}
 }
 
+func TestCORSDefaultsRemainBackwardCompatible(t *testing.T) {
+	path := writeConfig(t, `
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`)
+	rt, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rt.Config.Server.CORS.IsEnabled() {
+		t.Fatal("CORS should remain enabled by default for backward compatibility")
+	}
+	if got := rt.Config.Server.CORS.AllowedOrigins; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("allowed origins = %#v", got)
+	}
+	if rt.CORSMaxAge.String() != "10m0s" {
+		t.Fatalf("CORS max age = %s", rt.CORSMaxAge)
+	}
+}
+
+func TestCORSRejectsWildcardCredentials(t *testing.T) {
+	path := writeConfig(t, `
+server:
+  cors:
+    enabled: true
+    allowed_origins: ["*"]
+    allow_credentials: true
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected wildcard CORS with credentials to fail")
+	}
+}
+
+func TestCORSCanBeDisabled(t *testing.T) {
+	path := writeConfig(t, `
+server:
+  cors:
+    enabled: false
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`)
+	rt, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Config.Server.CORS.IsEnabled() {
+		t.Fatal("CORS should be disabled")
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

@@ -96,6 +96,8 @@ type ConfigSnapshot struct {
 	Providers        []ProviderSnapshot
 	LogRecent        int
 	Clients          []ClientSnapshot
+	CORSEnabled      bool
+	CORSOrigins      []string
 }
 
 type proxyResult struct {
@@ -114,6 +116,7 @@ func New(rt config.Runtime) (*Gateway, error) {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.ResponseHeaderTimeout = 0 // model generation may take a long time before first byte
 
+	metrics := NewMetrics()
 	providers := make(map[string]*providerRuntime, len(rt.Config.Providers))
 	for _, p := range rt.Config.Providers {
 		spec, ok := provider.Lookup(p.Type)
@@ -128,9 +131,13 @@ func New(rt config.Runtime) (*Gateway, error) {
 		for k, v := range p.Headers {
 			headers[k] = v
 		}
+		metrics.provider(p.Name) // expose configured providers even before first traffic
 		providers[p.Name] = &providerRuntime{
 			name: p.Name, spec: spec, baseURL: u, apiKey: p.APIKey, headers: headers,
-			client: &http.Client{Timeout: rt.ProviderTimeouts[p.Name], Transport: transport},
+			client: &http.Client{
+				Timeout:   rt.ProviderTimeouts[p.Name],
+				Transport: newProviderMetricsTransport(p.Name, transport, metrics),
+			},
 		}
 	}
 	defaultProvider := providers[rt.Config.DefaultProvider]
@@ -153,7 +160,7 @@ func New(rt config.Runtime) (*Gateway, error) {
 		cfg:             rt,
 		providers:       providers,
 		defaultProvider: defaultProvider,
-		metrics:         NewMetrics(),
+		metrics:         metrics,
 		logs:            NewLogRing(rt.Config.Logging.Recent),
 		tokens:          tokens,
 		limits:          limits,
@@ -161,7 +168,7 @@ func New(rt config.Runtime) (*Gateway, error) {
 	}
 	gw.server = &http.Server{
 		Addr:              rt.Config.Server.Listen,
-		Handler:           gw,
+		Handler:           newCORSHandler(gw, rt.Config.Server.CORS, rt.CORSMaxAge),
 		ReadTimeout:       rt.ReadTimeout,
 		ReadHeaderTimeout: minDuration(10*time.Second, rt.ReadTimeout, 10*time.Second),
 		WriteTimeout:      rt.WriteTimeout,
@@ -207,6 +214,8 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		UpstreamBaseURL:  g.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(g.defaultProvider.apiKey),
 		DefaultProvider: g.cfg.Config.DefaultProvider, Providers: providers,
 		LogRecent: g.cfg.Config.Logging.Recent, Clients: clients,
+		CORSEnabled: g.cfg.Config.Server.CORS.IsEnabled(),
+		CORSOrigins: append([]string(nil), g.cfg.Config.Server.CORS.AllowedOrigins...),
 	}
 }
 
@@ -216,11 +225,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", reqID)
 
 	if r.URL.Path == "/_healthz" && g.cfg.Config.Server.PublicHealth {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "gemgate", "uptime": time.Since(g.started).String()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"service":   "gemgate",
+			"uptime":    time.Since(g.started).String(),
+			"providers": providerHealthSnapshot(g.Metrics().Providers),
+		})
 		return
 	}
 	if r.Method == http.MethodOptions {
-		g.writeCORS(w)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -330,7 +343,6 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, clientName, reqI
 	defer resp.Body.Close()
 
 	copyResponseHeaders(w.Header(), resp.Header)
-	g.writeCORS(w)
 	w.WriteHeader(resp.StatusCode)
 	result.status = resp.StatusCode
 	result.responseStarted = true
@@ -424,12 +436,6 @@ func (g *Gateway) rateLimitReset(token string) time.Duration {
 	return reset
 }
 
-func (g *Gateway) writeCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-}
-
 func (g *Gateway) safeConfig() map[string]any {
 	clients := make([]map[string]any, 0, len(g.cfg.Config.Clients))
 	for _, c := range g.cfg.Config.Clients {
@@ -442,11 +448,31 @@ func (g *Gateway) safeConfig() map[string]any {
 		})
 	}
 	return map[string]any{
-		"server":           map[string]any{"listen": g.cfg.Config.Server.Listen, "public_health": g.cfg.Config.Server.PublicHealth, "request_body_limit": g.cfg.Config.Server.RequestBodyLimit},
+		"server": map[string]any{
+			"listen":             g.cfg.Config.Server.Listen,
+			"public_health":      g.cfg.Config.Server.PublicHealth,
+			"request_body_limit": g.cfg.Config.Server.RequestBodyLimit,
+			"cors": map[string]any{
+				"enabled":           g.cfg.Config.Server.CORS.IsEnabled(),
+				"allowed_origins":   g.cfg.Config.Server.CORS.AllowedOrigins,
+				"allowed_methods":   g.cfg.Config.Server.CORS.AllowedMethods,
+				"allowed_headers":   g.cfg.Config.Server.CORS.AllowedHeaders,
+				"allow_credentials": g.cfg.Config.Server.CORS.AllowCredentials,
+				"max_age":           g.cfg.Config.Server.CORS.MaxAge,
+			},
+		},
 		"default_provider": g.cfg.Config.DefaultProvider,
 		"providers":        providers,
 		"clients":          clients,
 	}
+}
+
+func providerHealthSnapshot(providers []ProviderMetricsSnapshot) map[string]string {
+	out := make(map[string]string, len(providers))
+	for _, p := range providers {
+		out[p.Name] = p.Health
+	}
+	return out
 }
 
 func copyRequestHeaders(dst, src http.Header) {
