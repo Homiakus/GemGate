@@ -72,6 +72,7 @@ type MetricsSnapshot struct {
 	AuthFailures   uint64
 	RateLimited    uint64
 	Providers      []ProviderMetricsSnapshot
+	Circuits       []CircuitSnapshot
 }
 
 func NewMetrics() *Metrics {
@@ -96,6 +97,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		AuthFailures:   m.AuthFailures.Load(),
 		RateLimited:    m.RateLimited.Load(),
 		Providers:      m.providerSnapshots(),
+		Circuits:       m.CircuitSnapshots(),
 	}
 }
 
@@ -249,11 +251,8 @@ gemgate_rate_limited_total %d
 gemgate_upstream_errors_total %d
 `, s.Requests, s.Requests2xx, s.Requests4xx, s.Requests5xx, s.InFlight, s.BytesIn, s.BytesOut, s.AuthFailures, s.RateLimited, s.UpstreamErrors)
 
-	if len(s.Providers) == 0 {
-		return b.String()
-	}
-
-	b.WriteString(`# HELP gemgate_provider_requests_total Completed provider requests by response class.
+	if len(s.Providers) > 0 {
+		b.WriteString(`# HELP gemgate_provider_requests_total Completed provider requests by response class.
 # TYPE gemgate_provider_requests_total counter
 # HELP gemgate_provider_inflight Current in-flight requests by provider.
 # TYPE gemgate_provider_inflight gauge
@@ -264,19 +263,41 @@ gemgate_upstream_errors_total %d
 # HELP gemgate_provider_consecutive_failures Consecutive provider transport/5xx failures.
 # TYPE gemgate_provider_consecutive_failures gauge
 `)
-	for _, p := range s.Providers {
-		label := prometheusLabel(p.Name)
-		fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"2xx\"} %d\n", label, p.Requests2xx)
-		fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"4xx\"} %d\n", label, p.Requests4xx)
-		fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"5xx\"} %d\n", label, p.Requests5xx)
-		fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"transport_error\"} %d\n", label, p.TransportErrors)
-		fmt.Fprintf(&b, "gemgate_provider_inflight{provider=\"%s\"} %d\n", label, p.InFlight)
-		fmt.Fprintf(&b, "gemgate_provider_transport_errors_total{provider=\"%s\"} %d\n", label, p.TransportErrors)
-		fmt.Fprintf(&b, "gemgate_provider_request_duration_seconds_sum{provider=\"%s\"} %.6f\n", label, p.TotalDuration.Seconds())
-		fmt.Fprintf(&b, "gemgate_provider_request_duration_seconds_count{provider=\"%s\"} %d\n", label, p.Requests)
-		fmt.Fprintf(&b, "gemgate_provider_consecutive_failures{provider=\"%s\"} %d\n", label, p.ConsecutiveFailures)
+		for _, p := range s.Providers {
+			label := prometheusLabel(p.Name)
+			fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"2xx\"} %d\n", label, p.Requests2xx)
+			fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"4xx\"} %d\n", label, p.Requests4xx)
+			fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"5xx\"} %d\n", label, p.Requests5xx)
+			fmt.Fprintf(&b, "gemgate_provider_requests_total{provider=\"%s\",status_class=\"transport_error\"} %d\n", label, p.TransportErrors)
+			fmt.Fprintf(&b, "gemgate_provider_inflight{provider=\"%s\"} %d\n", label, p.InFlight)
+			fmt.Fprintf(&b, "gemgate_provider_transport_errors_total{provider=\"%s\"} %d\n", label, p.TransportErrors)
+			fmt.Fprintf(&b, "gemgate_provider_request_duration_seconds_sum{provider=\"%s\"} %.6f\n", label, p.TotalDuration.Seconds())
+			fmt.Fprintf(&b, "gemgate_provider_request_duration_seconds_count{provider=\"%s\"} %d\n", label, p.Requests)
+			fmt.Fprintf(&b, "gemgate_provider_consecutive_failures{provider=\"%s\"} %d\n", label, p.ConsecutiveFailures)
+		}
+	}
+
+	if len(s.Circuits) > 0 {
+		b.WriteString(`# HELP gemgate_provider_circuit_state Current circuit-breaker state; exactly one state series per provider has value 1.
+# TYPE gemgate_provider_circuit_state gauge
+# HELP gemgate_provider_circuit_retry_after_seconds Remaining open interval before a half-open probe may be admitted.
+# TYPE gemgate_provider_circuit_retry_after_seconds gauge
+`)
+		for _, c := range s.Circuits {
+			providerLabel := prometheusLabel(c.Provider)
+			stateLabel := prometheusLabel(c.State)
+			fmt.Fprintf(&b, "gemgate_provider_circuit_state{provider=\"%s\",state=\"%s\"} 1\n", providerLabel, stateLabel)
+			fmt.Fprintf(&b, "gemgate_provider_circuit_retry_after_seconds{provider=\"%s\"} %.3f\n", providerLabel, maxDurationZero(c.RetryAfter).Seconds())
+		}
 	}
 	return b.String()
+}
+
+func maxDurationZero(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 func prometheusLabel(s string) string {
