@@ -27,12 +27,20 @@ func (m Model) configView() string {
 		if p.Name == m.cfg.DefaultProvider {
 			role = " [default]"
 		}
-		lines = append(lines, textStyle.Render(fmt.Sprintf("• %s (%s)%s", p.Name, p.Type, role))+mutedStyle.Render("  "+p.BaseURL+"  key="+p.APIKey))
+		circuit := "disabled"
+		if p.CircuitEnabled {
+			circuit = fmt.Sprintf("threshold=%d open=%s", p.CircuitFailureThreshold, p.CircuitOpenFor)
+		}
+		lines = append(lines,
+			textStyle.Render(fmt.Sprintf("• %s (%s)%s", p.Name, p.Type, role))+
+				mutedStyle.Render("  "+p.BaseURL+"  key="+p.APIKey+"  circuit="+circuit),
+		)
 	}
 	lines = append(lines,
 		"", subtitleStyle.Render("Security posture"), "",
 		textStyle.Render("• clients authenticate only with GemGate bearer tokens"),
 		textStyle.Render("• provider credentials are sanitized from inbound requests and injected server-side"),
+		textStyle.Render("• config, secrets and provider circuit policies are swapped atomically on hot reload"),
 		textStyle.Render("• browser CORS policy is explicit; server-to-server clients are unaffected"),
 		textStyle.Render("• provider quota, billing and safety responses pass through unchanged"),
 	)
