@@ -58,6 +58,9 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 			client: &http.Client{
 				Timeout:   rt.ProviderTimeouts[p.Name],
 				Transport: newProviderMetricsTransport(p.Name, g.transport, g.metrics, breaker),
+				CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
 			},
 		}
 	}
