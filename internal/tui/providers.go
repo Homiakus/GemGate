@@ -46,7 +46,7 @@ func (m Model) providersView() string {
 		subtitleStyle.Render("Routing & resilience"),
 		codeStyle.Render("Default: "+baseURL+"/<provider-path>"),
 		codeStyle.Render("Named:   "+baseURL+"/providers/{name}/<provider-path>"),
-		mutedStyle.Render("Circuit: 5 consecutive transport/5xx failures -> 30s open -> one half-open probe. No automatic retries."),
+		mutedStyle.Render("Circuit policy is per provider and hot-reloadable; defaults are threshold=5, open=30s. No automatic retries."),
 	))
 
 	return boxStyle.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left,
@@ -126,6 +126,8 @@ func providerCircuitText(state string) string {
 		return warnStyle.Render("half-open")
 	case "open":
 		return badStyle.Render(state)
+	case "disabled":
+		return mutedStyle.Render(state)
 	default:
 		return mutedStyle.Render("closed")
 	}
