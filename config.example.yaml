@@ -101,6 +101,18 @@ providers:
   #   type: cohere
   #   api_key: "${COHERE_API_KEY}"
   #
+  # - name: together
+  #   type: together
+  #   api_key: "${TOGETHER_API_KEY}"
+  #
+  # - name: cerebras
+  #   type: cerebras
+  #   api_key: "${CEREBRAS_API_KEY}"
+  #
+  # - name: fireworks
+  #   type: fireworks
+  #   api_key: "${FIREWORKS_API_KEY}"
+  #
   # Generic OpenAI-compatible endpoint. api_key is optional for local/no-auth servers.
   # - name: local
   #   type: openai-compatible

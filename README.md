@@ -22,7 +22,8 @@ GemGate **не** обходит provider quota/billing/safety rules и **не** 
 - explicit trusted-proxy CIDR/IP model;
 - configurable CORS;
 - provider-aware Charm TUI;
-- strict YAML (`KnownFields(true)`), race-tested CI и реальный Redis integration test.
+- strict YAML (`KnownFields(true)`), race-tested CI и реальный Redis integration test;
+- cross-platform release packaging, SHA-256, SPDX SBOM и GitHub artifact attestations.
 
 ## Архитектура
 
@@ -76,6 +77,9 @@ Immutable runtime snapshot
 | `deepseek` | `https://api.deepseek.com` | Bearer |
 | `xai` | `https://api.x.ai/v1` | Bearer |
 | `cohere` | `https://api.cohere.com/v2` | Bearer |
+| `together` | `https://api.together.ai/v1` | Bearer |
+| `cerebras` | `https://api.cerebras.ai/v1` | Bearer |
+| `fireworks` | `https://api.fireworks.ai/inference/v1` | Bearer |
 | `openai-compatible` | config | optional Bearer |
 | `none` | config | no auth |
 
@@ -175,6 +179,9 @@ POST /providers/openai/responses
 
 POST /providers/claude/v1/messages
   -> https://api.anthropic.com/v1/messages
+
+POST /providers/together/chat/completions
+  -> https://api.together.ai/v1/chat/completions
 ```
 
 Пути без `/providers/...` идут в `default_provider`.
@@ -329,6 +336,14 @@ go build ./cmd/gemgate
 
 CI поднимает реальный Redis service. Integration suite проверяет shared quota между двумя limiter instances, Redis fail-open semantics, secret-safe config, SSE early flush, streaming lifetime, cancellation propagation и provider timeout classification.
 
+Тот же CI вызывает `scripts/build-release.sh` и cross-compiles Linux/macOS/Windows для amd64/arm64, после чего запускает Linux release binary и проверяет injected version.
+
+## Releases
+
+Tag `vX.Y.Z` запускает `.github/workflows/release.yml`. Workflow проверяет source, собирает архивы тем же build-script, генерирует SPDX JSON SBOM и `checksums.txt`, создаёт GitHub artifact attestations и публикует GitHub Release.
+
+Подробности и команды проверки: [`docs/RELEASING.md`](docs/RELEASING.md).
+
 ## Production checklist
 
 - Terminate TLS на reverse proxy/load balancer/private ingress.
@@ -343,7 +358,7 @@ CI поднимает реальный Redis service. Integration suite пров
 - Ограничьте egress для custom provider URLs.
 - Не воспринимайте circuit breaker как retry/failover engine.
 
-Security: [`SECURITY.md`](SECURITY.md) · Audit: [`docs/AUDIT.md`](docs/AUDIT.md) · Rate limiting: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md)
+Security: [`SECURITY.md`](SECURITY.md) · Audit: [`docs/AUDIT.md`](docs/AUDIT.md) · Providers: [`docs/PROVIDERS.md`](docs/PROVIDERS.md) · Rate limiting: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md) · Releases: [`docs/RELEASING.md`](docs/RELEASING.md)
 
 ## Лицензия
 

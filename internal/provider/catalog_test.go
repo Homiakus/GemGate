@@ -52,3 +52,35 @@ func TestOpenAICompatibleAllowsNoKey(t *testing.T) {
 		t.Fatalf("unexpected Authorization %q", got)
 	}
 }
+
+func TestHostedOpenAICompatiblePresets(t *testing.T) {
+	tests := []struct {
+		kind string
+		base string
+	}{
+		{kind: "together", base: "https://api.together.ai/v1"},
+		{kind: "cerebras", base: "https://api.cerebras.ai/v1"},
+		{kind: "fireworks", base: "https://api.fireworks.ai/inference/v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			spec, ok := Lookup(tt.kind)
+			if !ok {
+				t.Fatalf("provider %q missing from catalog", tt.kind)
+			}
+			if spec.DefaultBaseURL != tt.base {
+				t.Fatalf("base URL = %q", spec.DefaultBaseURL)
+			}
+			if !spec.OpenAICompatible || !spec.RequiresAPIKey || spec.Auth != AuthBearer {
+				t.Fatalf("unexpected spec: %#v", spec)
+			}
+			req, _ := http.NewRequest(http.MethodPost, tt.base+"/chat/completions", nil)
+			if err := spec.ApplyHeaders(req, "provider-secret", nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer provider-secret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+		})
+	}
+}

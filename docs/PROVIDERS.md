@@ -1,40 +1,64 @@
 # Provider guide
 
-GemGate v0.3 includes provider presets for common hosted APIs while keeping a generic OpenAI-compatible mode for local or less common services.
+GemGate ships explicit presets for common hosted APIs plus generic modes for local/custom upstreams. Presets define only transport metadata such as base URL, authentication mode and compatibility flag; provider-native request/response schemas remain untouched.
 
-| Type | Default base URL | Auth injected by GemGate | OpenAI-compatible |
+| Type | Default base URL | Auth injected by GemGate | API style |
 | --- | --- | --- | --- |
-| `gemini` | `https://generativelanguage.googleapis.com` | native: `x-goog-api-key`; OpenAI path: Bearer | Yes, under Gemini's `/openai/` compatibility path |
-| `openai` | `https://api.openai.com/v1` | Bearer | Yes |
-| `anthropic` | `https://api.anthropic.com` | `x-api-key` + `anthropic-version` | Native Anthropic API |
-| `groq` | `https://api.groq.com/openai/v1` | Bearer | Yes |
-| `mistral` | `https://api.mistral.ai/v1` | Bearer | Yes |
-| `openrouter` | `https://openrouter.ai/api/v1` | Bearer | Yes |
-| `deepseek` | `https://api.deepseek.com` | Bearer | Yes |
-| `xai` | `https://api.x.ai/v1` | Bearer | Yes |
-| `cohere` | `https://api.cohere.com/v2` | Bearer | No; use Cohere-native paths |
-| `openai-compatible` | user supplied | Bearer when `api_key` is set | Yes |
-| `none` | user supplied | none | Depends on upstream |
+| `gemini` | `https://generativelanguage.googleapis.com` | native `x-goog-api-key`; OpenAI path Bearer | Gemini native + OpenAI compatibility |
+| `openai` | `https://api.openai.com/v1` | Bearer | OpenAI |
+| `anthropic` | `https://api.anthropic.com` | `x-api-key` + `anthropic-version` | Anthropic native |
+| `groq` | `https://api.groq.com/openai/v1` | Bearer | OpenAI-compatible |
+| `mistral` | `https://api.mistral.ai/v1` | Bearer | OpenAI-compatible |
+| `openrouter` | `https://openrouter.ai/api/v1` | Bearer | OpenAI-compatible |
+| `deepseek` | `https://api.deepseek.com` | Bearer | OpenAI-compatible |
+| `xai` | `https://api.x.ai/v1` | Bearer | OpenAI-compatible |
+| `cohere` | `https://api.cohere.com/v2` | Bearer | Cohere native |
+| `together` | `https://api.together.ai/v1` | Bearer | OpenAI-compatible |
+| `cerebras` | `https://api.cerebras.ai/v1` | Bearer | OpenAI-compatible |
+| `fireworks` | `https://api.fireworks.ai/inference/v1` | Bearer | OpenAI-compatible |
+| `openai-compatible` | user supplied | Bearer when `api_key` is set | Generic OpenAI-compatible |
+| `none` | user supplied | none | Custom HTTP upstream |
 
-Run `gemgate providers` to see the catalog compiled into the current binary.
+Run `gemgate providers` to inspect the catalog compiled into the current binary.
 
-## Examples
-
-### OpenAI
+## Hosted OpenAI-compatible examples
 
 ```yaml
-- name: openai
-  type: openai
-  api_key: "${OPENAI_API_KEY}"
+providers:
+  - name: openai
+    type: openai
+    api_key_file: "/run/secrets/openai_api_key"
+
+  - name: together
+    type: together
+    api_key: "${TOGETHER_API_KEY}"
+
+  - name: cerebras
+    type: cerebras
+    api_key: "${CEREBRAS_API_KEY}"
+
+  - name: fireworks
+    type: fireworks
+    api_key: "${FIREWORKS_API_KEY}"
 ```
 
-Client endpoint:
+All four can be reached through the same GemGate named-route pattern:
 
 ```text
-http://localhost:8080/providers/openai/responses
+http://localhost:8080/providers/<name>/<provider-path>
 ```
 
-### Anthropic
+For example:
+
+```text
+POST /providers/together/chat/completions
+POST /providers/cerebras/chat/completions
+POST /providers/fireworks/chat/completions
+```
+
+GemGate does not rewrite the model field or capability payload. Use model identifiers and endpoint paths supported by the selected provider.
+
+## Anthropic
 
 ```yaml
 - name: anthropic
@@ -48,9 +72,9 @@ Client endpoint:
 http://localhost:8080/providers/anthropic/v1/messages
 ```
 
-GemGate supplies the API key and a default `Anthropic-Version: 2023-06-01`. Override the version explicitly under `headers:` when required.
+GemGate supplies the API key and default `Anthropic-Version: 2023-06-01`. Override the version explicitly under `headers:` when required.
 
-### Gemini
+## Gemini
 
 Native endpoint:
 
@@ -64,7 +88,9 @@ OpenAI-compatible endpoint:
 http://localhost:8080/providers/gemini/v1beta/openai/chat/completions
 ```
 
-### Local OpenAI-compatible server
+The auth adapter switches between Gemini native key auth and Bearer auth according to the selected path.
+
+## Local OpenAI-compatible server
 
 ```yaml
 - name: local
@@ -72,7 +98,7 @@ http://localhost:8080/providers/gemini/v1beta/openai/chat/completions
   base_url: "http://127.0.0.1:11434/v1"
 ```
 
-Then point an OpenAI-style client to:
+`api_key` is optional for this generic type. Point an OpenAI-style client to:
 
 ```text
 http://localhost:8080/providers/local/
@@ -91,4 +117,16 @@ Provider headers can be declared server-side:
     X-Title: "GemGate"
 ```
 
-Do not put client-specific secrets in these headers: they are shared for every request routed to that provider.
+Custom headers are shared for every request routed to that configured provider. Treat authorization-like values as secrets.
+
+## Adding another preset
+
+A provider that already exposes an OpenAI-compatible API usually needs only a catalog entry if it uses standard Bearer authentication. A new auth scheme belongs behind a new `AuthMode`; it must not be embedded into routing or the TUI.
+
+Every new preset should add tests for:
+
+1. default base URL;
+2. required/optional key behavior;
+3. injected auth headers;
+4. `OpenAICompatible` classification;
+5. provider-specific default headers, if any.

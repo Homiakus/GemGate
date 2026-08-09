@@ -64,6 +64,18 @@ var catalog = map[string]Spec{
 		Type: "cohere", DisplayName: "Cohere", DefaultBaseURL: "https://api.cohere.com/v2",
 		Auth: AuthBearer, RequiresAPIKey: true,
 	},
+	"together": {
+		Type: "together", DisplayName: "Together AI", DefaultBaseURL: "https://api.together.ai/v1",
+		Auth: AuthBearer, RequiresAPIKey: true, OpenAICompatible: true,
+	},
+	"cerebras": {
+		Type: "cerebras", DisplayName: "Cerebras Inference", DefaultBaseURL: "https://api.cerebras.ai/v1",
+		Auth: AuthBearer, RequiresAPIKey: true, OpenAICompatible: true,
+	},
+	"fireworks": {
+		Type: "fireworks", DisplayName: "Fireworks AI", DefaultBaseURL: "https://api.fireworks.ai/inference/v1",
+		Auth: AuthBearer, RequiresAPIKey: true, OpenAICompatible: true,
+	},
 	"openai-compatible": {
 		Type: "openai-compatible", DisplayName: "OpenAI-compatible", DefaultBaseURL: "",
 		Auth: AuthBearer, RequiresAPIKey: false, OpenAICompatible: true,
