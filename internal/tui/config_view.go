@@ -16,7 +16,11 @@ func (m Model) configView() string {
 		rateLimit = "memory"
 	}
 	if rateLimit == "redis" {
-		rateLimit = fmt.Sprintf("redis (fail_open=%t)", m.cfg.RateLimitFailOpen)
+		mode := m.cfg.RateLimitMode
+		if mode == "" {
+			mode = "standalone"
+		}
+		rateLimit = fmt.Sprintf("redis/%s (fail_open=%t)", mode, m.cfg.RateLimitFailOpen)
 	}
 	operationsAuth := "legacy client-token fallback"
 	if m.cfg.DedicatedOperationsAuth {
