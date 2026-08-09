@@ -88,6 +88,7 @@ func connectionHeaderNames(h http.Header) map[string]struct{} {
 			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
 				out[name] = struct{}{}
 			}
+		}
 	}
 	return out
 }
