@@ -8,6 +8,13 @@ server:
   public_health: true         # makes /_healthz and /_readyz public
   request_body_limit: "32MiB"
 
+  # Trust X-Forwarded-For/X-Real-IP only when the immediate peer and every
+  # right-side hop are inside this explicit CIDR/IP list.
+  trusted_proxies: []
+  # trusted_proxies:
+  #   - "127.0.0.1"
+  #   - "10.0.0.0/8"
+
   # Browser CORS policy. Non-browser/server-to-server clients are unaffected.
   # Prefer an explicit allow-list in production. Set enabled: false if browsers
   # never call GemGate directly. This policy is hot-reloadable.
@@ -20,6 +27,22 @@ server:
     allow_credentials: false
     max_age: "10m"
 
+# Single-instance default. This remains an exact rolling one-minute window.
+rate_limit:
+  backend: memory
+
+# For horizontally scaled deployments use the shared Redis backend instead.
+# Redis credentials should normally live in a secret file. The connection
+# settings themselves require restart; clients[].rate_limit_rpm stays reloadable.
+# rate_limit:
+#   backend: redis
+#   redis:
+#     url_file: "/run/secrets/gemgate_redis_url"
+#     # Or: url: "rediss://user:password@redis.example.com:6379/0"
+#     key_prefix: "gemgate:ratelimit:"
+#     timeout: "2s"
+#     fail_open: false       # production default: reject if Redis is unavailable
+
 default_provider: gemini
 
 providers:
@@ -31,7 +54,6 @@ providers:
     timeout: "0s"
 
     # Optional provider-local resilience policy. All fields are hot-reloadable.
-    # Defaults are shown below. Set enabled: false for local/test providers if desired.
     circuit_breaker:
       enabled: true
       failure_threshold: 5
@@ -96,14 +118,18 @@ clients:
 
 logging:
   recent: 300
+  # Sensitive body/header capture is intentionally unavailable. true is rejected.
   log_body: false
   log_headers: false
 
 # Hot-reloadable without dropping in-flight requests:
 # - providers/default_provider, base_url, keys, headers, provider timeout, circuit policy
 # - clients/tokens/enabled/rate_limit_rpm
-# - CORS, request_body_limit, logging.recent
-# Listener and server read/write/idle timeouts require restart.
+# - trusted_proxies, CORS, request_body_limit, logging.recent
+#
+# Restart required:
+# - server listen/read/write/idle timeout settings
+# - rate_limit backend/Redis URL, key prefix, timeout and fail_open policy
 #
 # Circuit breakers never automatically retry user generation requests. While open,
 # GemGate returns a local 503 + Retry-After; after cooldown one half-open request

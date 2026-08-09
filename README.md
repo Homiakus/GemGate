@@ -1,91 +1,73 @@
 # GemGate
 
-<p align="center">
-  <strong>Multi-provider AI API gateway на Go: серверные ключи, клиентские токены, hot reload, streaming, resilience, observability и Charm TUI.</strong>
-</p>
+Multi-provider AI API gateway на Go: серверные provider keys, отдельные клиентские tokens, streaming passthrough, atomic hot reload, distributed rate limiting, circuit breakers, Prometheus и Charm TUI.
 
-<p align="center">
-  <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
-  <img alt="Charm TUI" src="https://img.shields.io/badge/TUI-Charm-6d28d9">
-  <img alt="Docker ready" src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white">
-  <img alt="Prometheus metrics" src="https://img.shields.io/badge/Metrics-Prometheus-E6522C?logo=prometheus&logoColor=white">
-</p>
+GemGate ставится между приложениями и AI-провайдерами. Клиент знает только свой GemGate bearer token; реальные provider credentials остаются на сервере. Gateway выбирает upstream, удаляет входные provider-auth headers, добавляет серверную авторизацию и проксирует provider-native payload/stream без искусственной трансляции схем.
 
-GemGate ставится между приложениями и AI-провайдерами. Клиент знает только собственный GemGate bearer token; реальные API keys OpenAI, Gemini, Anthropic и других сервисов остаются на сервере. Gateway выбирает upstream по маршруту, удаляет входные provider credentials, добавляет серверную авторизацию и прозрачно проксирует provider-native payloads и streaming responses.
+GemGate **не** обходит provider quota/billing/safety rules и **не** делает скрытые retry/failover генерации.
 
-GemGate **не** пытается превращать разные API в один искусственный формат. OpenAI-compatible endpoints остаются OpenAI-compatible, Anthropic остаётся Anthropic, Gemini native остаётся Gemini native. Это уменьшает поверхность ошибок и позволяет использовать новые возможности провайдеров без ожидания обновления транслятора.
+## Что умеет
 
-> GemGate не обходит квоты, billing, safety policies или upstream rate limits и не делает скрытых retry генерации.
-
-## Возможности
-
-| Возможность | Что даёт |
-| --- | --- |
-| Multi-provider routing | Несколько AI upstream в одном процессе через `/providers/{name}/...`. |
-| Default provider | Root URLs продолжают работать через `default_provider`. |
-| Server-side credentials | Provider API keys не выдаются приложениям. |
-| File-backed secrets | `api_key_file` и `token_file` подходят для Docker/Kubernetes/systemd credentials и live rotation. |
-| Atomic hot reload | Новый config полностью валидируется и только потом заменяет текущий runtime snapshot. |
-| In-flight safety | Уже начатый streaming request заканчивается на старом snapshot; новые запросы сразу используют новый. |
-| Credential isolation | Клиентские provider-auth headers не проходят upstream. |
-| Provider auth adapters | Bearer, Gemini native/OpenAI mode, Anthropic `x-api-key`, no-auth/custom endpoints. |
-| Streaming passthrough | SSE и другие streaming responses идут по мере поступления. |
-| Cancellation isolation | Downstream cancel не считается отказом провайдера и не открывает circuit breaker. |
-| Sliding-window rate limit | Точное rolling one-minute окно без fixed-window double burst. |
-| Configurable circuit breaker | `enabled`, `failure_threshold`, `open_for` отдельно для каждого provider, hot-reloadable. |
-| Passive readiness | `/_readyz` учитывает circuit state default provider без synthetic provider calls. |
-| Provider observability | Requests, 2xx/4xx/5xx, transport errors, in-flight, duration, circuit и passive health. |
-| Prometheus | Global + provider-labelled metrics на `/_metrics`. |
-| Configurable CORS | Disable switch, allow-list, preflight validation, credentials policy и max-age. |
-| Charm TUI | Overview, Logs, Clients, Providers, Config и Help. |
-| Strict config | Unknown YAML fields отклоняются через `KnownFields(true)`. |
-| Legacy migration | Старый `upstream:` автоматически становится provider `gemini`. |
+- несколько AI providers в одном процессе через `/providers/{name}/...`;
+- root-route через `default_provider` для обратной совместимости;
+- built-in provider auth adapters + generic OpenAI-compatible/custom endpoints;
+- file-backed provider/client secrets и live rotation;
+- immutable runtime snapshots и validation-before-swap hot reload;
+- SSE/streaming passthrough с корректным early flush;
+- downstream cancellation, отделённый от provider timeout/failure;
+- exact rolling one-minute client rate limit;
+- `memory` limiter для одного процесса и `redis` для общей quota нескольких replicas;
+- configurable per-provider circuit breaker без automatic request replay;
+- `/_healthz`, passive `/_readyz`, redacted `/_config`, Prometheus `/_metrics`;
+- explicit trusted-proxy CIDR/IP model;
+- configurable CORS;
+- provider-aware Charm TUI;
+- strict YAML (`KnownFields(true)`), race-tested CI и реальный Redis integration test.
 
 ## Архитектура
 
 ```text
 Client / SDK
-    │  GemGate bearer token
+    │ GemGate bearer token
     ▼
-CORS policy
+CORS + trusted-proxy boundary
     ▼
 Immutable runtime snapshot
-    ├── client auth + rolling rate limit
+    ├── client auth
+    ├── rate-limit policy ──► memory | Redis shared backend
     ├── provider router + auth adapter
-    ├── request/body policy
-    └── provider client
-             │
-             ▼
-       circuit breaker
-             │
-             ▼
+    └── request/body policy
+              │
+              ▼
+        circuit breaker
+              │
+              ▼
        metrics transport
-             │
-             ▼
-         AI provider
+              │
+              ▼
+          AI provider
 ```
 
-Runtime и HTTP-часть разделены по ответственности:
+Ключевые пакеты:
 
-- `internal/config` — strict YAML, environment expansion, file-backed secrets, circuit policies, defaults и validation;
+- `internal/config` — strict YAML, defaults, secrets, CORS, trusted proxies, Redis/circuit validation;
 - `internal/provider` — provider catalog и auth contract;
-- `internal/gateway/gateway.go` — lifecycle и request coordination;
 - `internal/gateway/runtime.go` — immutable snapshots и atomic reload;
-- `internal/gateway/proxy.go` — routing/auth/upstream streaming;
-- `internal/gateway/request_context.go` — разделение downstream cancellation и provider timeout;
-- `internal/gateway/circuitbreaker.go` — snapshot-scoped provider circuit state machine;
-- `internal/gateway/readiness.go` / `health.go` — passive readiness и liveness;
-- `internal/gateway/http_helpers.go` — HTTP/redaction helpers;
-- `internal/tui` — presentation поверх gateway snapshots;
+- `internal/gateway/proxy.go` — routing/auth/streaming;
+- `internal/gateway/ratelimit*.go` — memory/Redis rolling quota;
+- `internal/gateway/circuitbreaker.go` — closed/open/half-open state machine;
+- `internal/gateway/provider_metrics_transport.go` — stream-aware provider telemetry;
+- `internal/gateway/trusted_proxy.go` — forwarded-IP trust boundary;
+- `internal/tui` — operator presentation only;
 - `cmd/gemgate` — CLI, watcher и process lifecycle.
 
 Подробнее: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Поддерживаемые provider types
+## Provider types
 
 | `type` | Default upstream | Auth |
 | --- | --- | --- |
-| `gemini` | `https://generativelanguage.googleapis.com` | native `x-goog-api-key`; OpenAI path — Bearer |
+| `gemini` | `https://generativelanguage.googleapis.com` | Gemini native key / Bearer on OpenAI-compatible path |
 | `openai` | `https://api.openai.com/v1` | Bearer |
 | `anthropic` | `https://api.anthropic.com` | `x-api-key` + `anthropic-version` |
 | `groq` | `https://api.groq.com/openai/v1` | Bearer |
@@ -94,8 +76,8 @@ Runtime и HTTP-часть разделены по ответственност�
 | `deepseek` | `https://api.deepseek.com` | Bearer |
 | `xai` | `https://api.x.ai/v1` | Bearer |
 | `cohere` | `https://api.cohere.com/v2` | Bearer |
-| `openai-compatible` | задаётся в config | Bearer, если задан `api_key` |
-| `none` | задаётся в config | без auth |
+| `openai-compatible` | config | optional Bearer |
+| `none` | config | no auth |
 
 ```bash
 gemgate providers
@@ -118,21 +100,19 @@ Headless:
 go run ./cmd/gemgate serve -config config.yaml
 ```
 
-Hot reload включён по умолчанию с интервалом 5 секунд:
+Hot reload по умолчанию проверяет config/secrets каждые 5 секунд:
 
 ```bash
 gemgate serve -config config.yaml -reload-interval 5s
 ```
 
-Выключить polling:
+Отключить polling:
 
 ```bash
 gemgate serve -config config.yaml -reload-interval 0
 ```
 
-## Конфигурация
-
-Минимальный пример:
+## Минимальная конфигурация
 
 ```yaml
 server:
@@ -142,18 +122,19 @@ server:
   idle_timeout: "120s"
   public_health: true
   request_body_limit: "32MiB"
-
+  trusted_proxies: []
   cors:
     enabled: true
-    allowed_origins:
-      - "http://localhost:3000"
+    allowed_origins: ["http://localhost:3000"]
     allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
     allowed_headers: ["Authorization", "Content-Type", "X-Request-ID"]
     allow_credentials: false
     max_age: "10m"
 
-default_provider: gemini
+rate_limit:
+  backend: memory
 
+default_provider: gemini
 providers:
   - name: gemini
     type: gemini
@@ -169,89 +150,24 @@ clients:
     token: "${GEMGATE_TOKEN}"
     enabled: true
     rate_limit_rpm: 120
+
+logging:
+  recent: 300
+  log_body: false
+  log_headers: false
 ```
 
-`write_timeout: "0s"` и provider `timeout: "0s"` обычно удобны для long-lived model streaming.
-
-### File-backed secrets
-
-Вместо inline/environment provider key:
-
-```yaml
-providers:
-  - name: openai
-    type: openai
-    api_key_file: "/run/secrets/openai_api_key"
-```
-
-Для client token:
-
-```yaml
-clients:
-  - name: backend
-    token_file: "/run/secrets/gemgate_backend_token"
-    enabled: true
-    rate_limit_rpm: 120
-```
-
-Пути могут быть абсолютными или относительными к каталогу `config.yaml`. Secret file читается заново при каждом reload cycle. Пустой файл отклоняется. `api_key` и `api_key_file` одновременно задавать нельзя; то же правило действует для `token`/`token_file`.
-
-Практический способ ротации — заменить secret file атомарно и дождаться следующего reload cycle. Если новый config/secret некорректен, GemGate оставляет последний рабочий runtime целиком.
-
-### Что reloadable
-
-Без restart можно менять:
-
-- providers: состав, `default_provider`, `base_url`, key/file, headers, provider timeout и circuit policy;
-- clients: token/file, enabled, RPM limit;
-- CORS policy;
-- `request_body_limit`;
-- `logging.recent`.
-
-Restart требуется для listener-level параметров:
-
-- `server.listen`;
-- `server.read_timeout`;
-- `server.write_timeout`;
-- `server.idle_timeout`.
-
-Это сознательное ограничение: reload не должен частично менять уже запущенный `http.Server`.
-
-### Несколько провайдеров
-
-```yaml
-default_provider: openai
-
-providers:
-  - name: openai
-    type: openai
-    api_key_file: "/run/secrets/openai_api_key"
-    circuit_breaker:
-      failure_threshold: 5
-      open_for: "30s"
-
-  - name: claude
-    type: anthropic
-    api_key: "${ANTHROPIC_API_KEY}"
-
-  - name: fast
-    type: groq
-    api_key: "${GROQ_API_KEY}"
-
-  - name: local
-    type: openai-compatible
-    base_url: "http://127.0.0.1:11434/v1"
-    circuit_breaker:
-      enabled: false
-```
+`write_timeout: "0s"` и provider `timeout: "0s"` подходят для long-lived model streams. `logging.log_body` / `logging.log_headers` могут оставаться только `false`; `true` намеренно отклоняется.
 
 ## Маршрутизация
+
+Named route:
 
 ```text
 /providers/{provider-name}/{provider-path}
 ```
 
-Префикс provider route удаляется перед отправкой upstream:
+Примеры:
 
 ```text
 POST /providers/openai/responses
@@ -263,185 +179,171 @@ POST /providers/claude/v1/messages
 
 Пути без `/providers/...` идут в `default_provider`.
 
-## Клиентская авторизация
-
-Все приложения используют GemGate token:
+Клиент всегда авторизуется в GemGate:
 
 ```http
 Authorization: Bearer <GEMGATE_TOKEN>
 ```
 
-До upstream GemGate удаляет известные provider credential headers, затем selected adapter выставляет серверную авторизацию. GemGate bearer token не должен попадать AI-провайдеру.
+Этот token не пересылается provider. Provider auth создаётся заново из server-side config.
 
-## CORS
+## Secrets и hot reload
 
-CORS — браузерная политика, а не authentication.
-
-Production allow-list:
-
-```yaml
-server:
-  cors:
-    enabled: true
-    allowed_origins:
-      - "https://app.example.com"
-      - "https://admin.example.com"
-    allowed_methods: ["GET", "POST", "OPTIONS"]
-    allowed_headers: ["Authorization", "Content-Type", "X-Request-ID"]
-    max_age: "10m"
-```
-
-Или отключить:
-
-```yaml
-server:
-  cors:
-    enabled: false
-```
-
-`allow_credentials: true` с wildcard origin отклоняется. При отсутствии `server.cors` старые конфиги сохраняют wildcard behavior ради совместимости.
-
-## Rate limiting
-
-`clients[].rate_limit_rpm` — process-local exact sliding window на последние 60 секунд. Он убирает double burst fixed-window limiter, но не является глобальным лимитом для нескольких replicas.
-
-Для общего quota across replicas нужен shared enforcement/backend; это остаётся отдельным архитектурным слоем.
-
-## Circuit breaker
-
-Breaker защищает upstream и budget от повторного шторма при явно падающем provider, но **не повторяет пользовательские запросы**.
-
-Политика задаётся отдельно для каждого provider:
+Provider key:
 
 ```yaml
 providers:
   - name: openai
     type: openai
     api_key_file: "/run/secrets/openai_api_key"
-    circuit_breaker:
-      enabled: true
-      failure_threshold: 5
-      open_for: "30s"
 ```
 
-Если блок не задан, используются defaults `enabled: true`, `failure_threshold: 5`, `open_for: 30s`.
+Client token:
 
-Поведение:
+```yaml
+clients:
+  - name: backend
+    token_file: "/run/secrets/gemgate_backend_token"
+    enabled: true
+    rate_limit_rpm: 120
+```
 
-- failure = transport error или HTTP 5xx;
-- HTTP 4xx/429 circuit не открывают;
-- при достижении `failure_threshold` circuit переходит в `open`;
-- пока circuit открыт, GemGate отвечает локальным `503 Service Unavailable`, `Retry-After` и `X-GemGate-Circuit: open`, не вызывая upstream;
-- после `open_for` пропускается ровно один `half_open` probe;
-- успешный probe закрывает circuit, неуспешный открывает его ещё на `open_for`;
-- никаких automatic retries generation requests нет;
-- `enabled: false` полностью отключает breaker для конкретного provider.
+Candidate config полностью загружается, резолвит secret files, применяет defaults и проходит validation. Только после этого активный runtime заменяется целиком. Некорректная ревизия не частично применяется.
 
-Circuit policy hot-reloadable. Breaker принадлежит immutable runtime snapshot: новый snapshot клонирует текущее состояние под новую policy, а уже начатые streaming requests продолжают жить со старым breaker/policy до завершения.
+Уже начатый streaming request заканчивается на старом snapshot; новые requests после swap используют новый.
 
-Downstream cancellation не считается provider failure. Provider/network timeout, при котором исходный downstream context остаётся активным, считается transport failure.
+Hot-reloadable:
 
-## Observability и health
+- providers/default provider, keys, URLs, headers, timeouts, circuit policy;
+- client token/enabled/RPM;
+- trusted proxies;
+- CORS;
+- request body limit;
+- recent log-ring size.
 
-### Operational endpoints
+Restart-required:
+
+- listener/read/write/idle server settings;
+- rate-limit backend и Redis connection/failure-policy settings.
+
+## Rate limiting
+
+### Один процесс
+
+```yaml
+rate_limit:
+  backend: memory
+```
+
+`memory` — default: exact rolling 60-second window без fixed-window double burst.
+
+### Несколько replicas
+
+```yaml
+rate_limit:
+  backend: redis
+  redis:
+    url_file: "/run/secrets/gemgate_redis_url"
+    key_prefix: "gemgate:ratelimit:"
+    timeout: "2s"
+    fail_open: false
+```
+
+Redis backend использует atomic Lua operation и Redis server time, поэтому две независимые GemGate replicas видят одну quota. Redis key строится из SHA-256-derived client identifier; raw bearer token в key не записывается.
+
+По умолчанию Redis failure — **fail-closed**: GemGate отвечает локальным `503` и не вызывает AI provider. `fail_open: true` — отдельное осознанное решение, при котором запрос разрешается, а backend error логируется и увеличивает `gemgate_rate_limit_backend_errors_total`.
+
+Redis URL/credentials не выводятся в `/_config` или TUI. Подробнее: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md).
+
+## Circuit breaker
+
+Каждый provider может иметь собственную policy:
+
+```yaml
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  open_for: "30s"
+```
+
+- transport errors и HTTP 5xx считаются failures;
+- 4xx/429 circuit не открывают;
+- при threshold circuit становится `open`;
+- open requests получают local `503`, `Retry-After`, `X-GemGate-Circuit: open` без upstream call;
+- после cooldown допускается ровно один `half_open` probe;
+- успешный probe закрывает circuit;
+- **automatic retries/replay отсутствуют**.
+
+Downstream cancellation не считается provider failure; provider/network timeout считается.
+
+## Trusted proxies
+
+```yaml
+server:
+  trusted_proxies:
+    - "127.0.0.1"
+    - "10.0.0.0/8"
+```
+
+GemGate доверяет forwarded IP только через явно доверенную цепочку. Spoofed `X-Forwarded-For` от обычного клиента игнорируется. Перед upstream исходные forwarding headers удаляются и формируются заново из вычисленного client IP.
+
+Подробнее: [`docs/TRUSTED_PROXIES.md`](docs/TRUSTED_PROXIES.md).
+
+## Operational endpoints
 
 | Endpoint | Auth | Назначение |
 | --- | --- | --- |
-| `/_healthz` | public при `public_health: true`, иначе GemGate bearer token | process liveness + passive provider health summary |
-| `/_readyz` | public при `public_health: true`, иначе GemGate bearer token | passive readiness по circuit state default provider |
-| `/_metrics` | GemGate bearer token | Prometheus metrics |
-| `/_config` | GemGate bearer token | redacted runtime config + provider circuit policy |
+| `/_healthz` | public при `public_health: true`, иначе bearer | liveness + passive provider summary |
+| `/_readyz` | public при `public_health: true`, иначе bearer | passive readiness default provider |
+| `/_metrics` | bearer | Prometheus |
+| `/_config` | bearer | redacted runtime config |
 
-`/_healthz` всегда локальный endpoint и остаётся liveness: он не падает только потому, что upstream деградировал.
+`/_readyz` не делает synthetic provider calls и не расходует quota.
 
-`/_readyz` — **passive readiness**. Он не делает synthetic provider calls и не расходует quota. Если circuit default provider `open` или `half_open`, endpoint возвращает `503`; проблемы named/non-default provider не снимают весь gateway с readiness. Если breaker default provider намеренно `disabled`, readiness не блокируется breaker state.
-
-Provider health telemetry:
-
-- `unknown` — ещё нет завершённых запросов;
-- `healthy` — нет failure streak;
-- `warning` — 1–2 transport/5xx failures;
-- `degraded` — 3+ failures.
-
-### Prometheus
-
-Экспортируются global и provider-labelled series, включая:
-
-```text
-gemgate_provider_requests_total{provider="openai",status_class="2xx"}
-gemgate_provider_inflight{provider="openai"}
-gemgate_provider_transport_errors_total{provider="openai"}
-gemgate_provider_request_duration_seconds_sum{provider="openai"}
-gemgate_provider_request_duration_seconds_count{provider="openai"}
-gemgate_provider_consecutive_failures{provider="openai"}
-gemgate_provider_circuit_state{provider="openai",state="closed"}
-gemgate_provider_circuit_retry_after_seconds{provider="openai"}
-```
-
-Provider duration измеряется до EOF/Close response body, поэтому streaming lifetime учитывается целиком.
+Prometheus включает global/provider/circuit series и `gemgate_rate_limit_backend_errors_total`.
 
 ## TUI
 
-Разделы:
+Views:
 
-1. **Overview** — traffic, p95, rate limits и provider/circuit attention;
-2. **Logs** — provider-aware request log;
-3. **Clients** — usage и RPM limits;
-4. **Providers** — type, default role, health, circuit state, requests, errors, in-flight и duration;
-5. **Config** — redacted runtime config, CORS и provider circuit policies;
-6. **Help** — controls и operational notes.
+1. **Overview** — traffic, latency, provider/circuit attention;
+2. **Logs** — client/provider/IP-aware request log;
+3. **Clients** — usage и RPM policy;
+4. **Providers** — health, circuit, requests, errors, duration;
+5. **Config** — redacted provider + rate-limit/CORS configuration;
+6. **Help**.
 
 Управление: `1-6`, `Tab`, `Shift+Tab`, `r`, `space/p`, `a/w/e/u`, `?`, `q`.
 
-## Legacy config
+## CI и тестирование
 
-Старый Gemini-only config остаётся валиден:
-
-```yaml
-upstream:
-  base_url: "https://generativelanguage.googleapis.com"
-  api_key: "${GEMINI_API_KEY}"
-  timeout: "0s"
-```
-
-`upstream.api_key_file` также поддерживается. Legacy provider получает стандартную circuit policy.
-
-## Docker / systemd
-
-```bash
-docker compose up --build
-```
-
-Для production отдавайте secrets через environment/orchestrator credentials или file-backed secrets. Не запекайте ключи в image.
-
-В репозитории есть `gemgate.service`; адаптируйте `WorkingDirectory`, `ExecStart`, Unix user/group и способ доставки секретов.
-
-## Разработка
+Каждый push/PR проходит:
 
 ```bash
 go mod verify
-gofmt -w .
+gofmt
 go vet ./...
 go test -race -cover ./...
 go build ./cmd/gemgate
 ```
 
-GitHub Actions выполняет эти проверки на каждом push и pull request. Integration suite дополнительно проверяет ранний SSE flush, streaming lifetime metrics, downstream cancellation propagation и provider timeout classification.
+CI поднимает реальный Redis service. Integration suite проверяет shared quota между двумя limiter instances, Redis fail-open semantics, secret-safe config, SSE early flush, streaming lifetime, cancellation propagation и provider timeout classification.
 
 ## Production checklist
 
-- Terminate TLS на Caddy/Nginx/Traefik/load balancer/private ingress.
+- Terminate TLS на reverse proxy/load balancer/private ingress.
 - Используйте отдельный GemGate token для каждого consumer.
-- Предпочитайте file-backed/orchestrator secrets для live rotation.
-- Явно настройте CORS или отключите его.
-- Ограничьте `rate_limit_rpm`, если compromised client может создать расходы.
-- Подберите circuit policy по latency/error characteristics provider; не используйте breaker как retry/failover engine.
-- Используйте `/_healthz` для liveness, `/_readyz` для passive readiness.
-- Ограничьте egress для custom `base_url`.
-- Оставляйте request/response bodies вне логов по умолчанию.
-- Rate limits и recent log ring process-local.
+- Предпочитайте file-backed/orchestrator secrets.
+- Для multi-replica quota используйте Redis backend; держите `fail_open: false`, если quota защищает расходы.
+- Используйте `rediss://` или private network для удалённого Redis.
+- Настройте `trusted_proxies` только для контролируемой proxy-chain.
+- Настройте CORS явно или отключите его для server-only deployment.
+- Используйте `/_healthz` для liveness и `/_readyz` для passive readiness.
+- Не включайте body/header logging — чувствительный capture намеренно отсутствует.
+- Ограничьте egress для custom provider URLs.
+- Не воспринимайте circuit breaker как retry/failover engine.
 
-Security: [`SECURITY.md`](SECURITY.md). Audit backlog: [`docs/AUDIT.md`](docs/AUDIT.md).
+Security: [`SECURITY.md`](SECURITY.md) · Audit: [`docs/AUDIT.md`](docs/AUDIT.md) · Rate limiting: [`docs/RATE_LIMITING.md`](docs/RATE_LIMITING.md)
 
 ## Лицензия
 
