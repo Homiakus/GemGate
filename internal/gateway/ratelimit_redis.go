@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -43,21 +44,49 @@ type redisRateLimitBackend struct {
 	prefix   string
 	instance string
 	seq      atomic.Uint64
+	mode     string
 }
 
 func newRedisRateLimitBackend(cfg config.RedisRateLimitConfig, timeout time.Duration) (*redisRateLimitBackend, error) {
-	opts, err := redis.ParseURL(cfg.URL)
+	client, mode, err := newRedisRateLimitClient(cfg.URL, timeout)
 	if err != nil {
 		return nil, err
+	}
+	return &redisRateLimitBackend{
+		client:   client,
+		prefix:   cfg.KeyPrefix,
+		instance: redisInstanceID(),
+		mode:     mode,
+	}, nil
+}
+
+func newRedisRateLimitClient(redisURL string, timeout time.Duration) (*redis.Client, string, error) {
+	u, err := url.Parse(redisURL)
+	if err != nil {
+		return nil, "", err
+	}
+	if u.Query().Get("master_name") != "" {
+		opts, err := redis.ParseFailoverURL(redisURL)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse Redis Sentinel failover URL: %w", err)
+		}
+		if opts.MasterName == "" {
+			return nil, "", fmt.Errorf("Redis Sentinel URL requires master_name")
+		}
+		opts.DialTimeout = timeout
+		opts.ReadTimeout = timeout
+		opts.WriteTimeout = timeout
+		return redis.NewFailoverClient(opts), "sentinel", nil
+	}
+
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, "", err
 	}
 	opts.DialTimeout = timeout
 	opts.ReadTimeout = timeout
 	opts.WriteTimeout = timeout
-	return &redisRateLimitBackend{
-		client:   redis.NewClient(opts),
-		prefix:   cfg.KeyPrefix,
-		instance: redisInstanceID(),
-	}, nil
+	return redis.NewClient(opts), "standalone", nil
 }
 
 func (b *redisRateLimitBackend) Allow(ctx context.Context, key string, limit int, _ time.Time) (rateLimitDecision, error) {
@@ -86,6 +115,7 @@ func (b *redisRateLimitBackend) Allow(ctx context.Context, key string, limit int
 func (b *redisRateLimitBackend) Retain(map[string]struct{}) {}
 func (b *redisRateLimitBackend) Close() error               { return b.client.Close() }
 func (b *redisRateLimitBackend) Name() string               { return "redis" }
+func (b *redisRateLimitBackend) Mode() string               { return b.mode }
 
 func redisInt64(value any) (int64, error) {
 	switch v := value.(type) {
