@@ -21,6 +21,34 @@ func TestRateLimitKeyDoesNotExposeToken(t *testing.T) {
 	}
 }
 
+func TestRedisRateLimitClientSelectsStandaloneMode(t *testing.T) {
+	client, mode, err := newRedisRateLimitClient("redis://127.0.0.1:6379/0", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if mode != "standalone" {
+		t.Fatalf("mode=%q", mode)
+	}
+}
+
+func TestRedisRateLimitClientSelectsSentinelMode(t *testing.T) {
+	client, mode, err := newRedisRateLimitClient("redis://sentinel-1:26379/0?master_name=gemgate-master&addr=sentinel-2%3A26379&addr=sentinel-3%3A26379", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if mode != "sentinel" {
+		t.Fatalf("mode=%q", mode)
+	}
+}
+
+func TestRedisRateLimitClientRejectsMalformedSentinelURL(t *testing.T) {
+	if _, _, err := newRedisRateLimitClient("redis://sentinel-1:26379/0?master_name=gemgate-master&unknown_option=true", time.Second); err == nil {
+		t.Fatal("expected malformed Sentinel URL to fail")
+	}
+}
+
 func TestRedisRateLimitIsSharedAcrossInstances(t *testing.T) {
 	redisURL := os.Getenv("GEMGATE_TEST_REDIS_URL")
 	if redisURL == "" {
