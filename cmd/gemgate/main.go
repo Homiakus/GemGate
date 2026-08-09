@@ -6,8 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +60,7 @@ func run(withTUI bool, args []string) error {
 	fs := flag.NewFlagSet("gemgate", flag.ContinueOnError)
 	configPath := fs.String("config", "config.yaml", "path to YAML config")
 	reloadInterval := fs.Duration("reload-interval", 5*time.Second, "config/secret reload interval; 0 disables hot reload")
+	operationsListen := fs.String("operations-listen", "", "optional dedicated listen address for /_healthz, /_readyz, /_metrics and /_config")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,8 +95,40 @@ func run(withTUI bool, args []string) error {
 		return err
 	}
 
-	serverErr := make(chan error, 1)
+	serverErr := make(chan error, 2)
 	go func() { serverErr <- gw.ListenAndServe() }()
+
+	var operationsServer *http.Server
+	operationsAddr := strings.TrimSpace(*operationsListen)
+	if operationsAddr != "" {
+		if operationsAddr == strings.TrimSpace(rt.Config.Server.Listen) {
+			_ = shutdown(gw, nil)
+			return fmt.Errorf("operations-listen must differ from server.listen")
+		}
+		listener, err := net.Listen("tcp", operationsAddr)
+		if err != nil {
+			_ = shutdown(gw, nil)
+			return fmt.Errorf("listen operations endpoint %q: %w", operationsAddr, err)
+		}
+		gw.IsolateOperationsEndpoints()
+		operationsServer = &http.Server{
+			Addr:              operationsAddr,
+			Handler:           gw.OperationsHandler(),
+			ReadTimeout:       rt.ReadTimeout,
+			ReadHeaderTimeout: minPositiveDuration(10*time.Second, rt.ReadTimeout),
+			WriteTimeout:      rt.WriteTimeout,
+			IdleTimeout:       rt.IdleTimeout,
+			MaxHeaderBytes:    1 << 20,
+		}
+		go func() {
+			log.Printf("operations listener on %s", operationsAddr)
+			err := operationsServer.Serve(listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			serverErr <- err
+		}()
+	}
 
 	reloadCtx, cancelReload := context.WithCancel(context.Background())
 	defer cancelReload()
@@ -104,14 +140,17 @@ func run(withTUI bool, args []string) error {
 		p := tea.NewProgram(tui.New(gw))
 		if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrInterrupted) {
 			cancelReload()
-			_ = shutdown(gw)
+			_ = shutdown(gw, operationsServer)
 			return err
 		}
 		cancelReload()
-		return shutdown(gw)
+		return shutdown(gw, operationsServer)
 	}
 
 	printRuntimeInfo(gw.ConfigSnapshot())
+	if operationsServer != nil {
+		fmt.Printf("Operations listener: %s (operational paths removed from application port)\n", operationsServer.Addr)
+	}
 	if *reloadInterval > 0 {
 		fmt.Printf("Hot reload: every %s (invalid revisions are rejected atomically)\n", reloadInterval.String())
 	}
@@ -120,9 +159,10 @@ func run(withTUI bool, args []string) error {
 	select {
 	case <-stop:
 		cancelReload()
-		return shutdown(gw)
+		return shutdown(gw, operationsServer)
 	case err := <-serverErr:
 		cancelReload()
+		_ = shutdown(gw, operationsServer)
 		return err
 	}
 }
@@ -198,21 +238,45 @@ func printProviders() {
 	}
 }
 
-func shutdown(gw *gateway.Gateway) error {
+func shutdown(gw *gateway.Gateway, operationsServer *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return gw.Shutdown(ctx)
+
+	var operationsErr error
+	if operationsServer != nil {
+		operationsErr = operationsServer.Shutdown(ctx)
+	}
+	gatewayErr := gw.Shutdown(ctx)
+	if gatewayErr != nil {
+		return gatewayErr
+	}
+	return operationsErr
+}
+
+func minPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 func usage() {
 	fmt.Print(`GemGate — multi-provider AI API gateway with Charm TUI
 
 Usage:
-  gemgate run       -config config.yaml [-reload-interval 5s]  # server + TUI
-  gemgate tui       -config config.yaml [-reload-interval 5s]  # alias for run
-  gemgate serve     -config config.yaml [-reload-interval 5s]  # headless server
-  gemgate providers                                           # list built-in provider types
+  gemgate run       -config config.yaml [-reload-interval 5s] [-operations-listen 127.0.0.1:9090]
+  gemgate tui       -config config.yaml [-reload-interval 5s] [-operations-listen 127.0.0.1:9090]
+  gemgate serve     -config config.yaml [-reload-interval 5s] [-operations-listen 127.0.0.1:9090]
+  gemgate providers
   gemgate version
+
+Operations isolation:
+  -operations-listen <addr> starts a separate listener for /_healthz, /_readyz,
+  /_metrics and /_config. Those paths then return 404 on the application listener.
+  Application/provider routes always return 404 on the operations listener.
 
 Hot reload:
   Provider/client/CORS/trusted-proxy policy is validated and swapped atomically.
