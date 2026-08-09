@@ -14,6 +14,7 @@ import (
 	"gemgate/internal/config"
 	"gemgate/internal/gateway"
 	"gemgate/internal/provider"
+	"gemgate/internal/telemetry"
 	"gemgate/internal/tui"
 
 	tea "charm.land/bubbletea/v2"
@@ -73,6 +74,18 @@ func run(withTUI bool, args []string) error {
 	if err != nil {
 		return err
 	}
+	shutdownTelemetry, err := telemetry.Setup(context.Background(), rt.Config.Telemetry, version)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+
 	gw, err := gateway.New(rt)
 	if err != nil {
 		return err
@@ -203,7 +216,7 @@ Usage:
 
 Hot reload:
   Provider/client/CORS/trusted-proxy policy is validated and swapped atomically.
-  Listener timeouts and rate-limit backend/Redis connection settings require restart.
+  Listener, telemetry and rate-limit backend/Redis connection settings require restart.
   Set -reload-interval 0 to disable polling.
 
 Routing:
