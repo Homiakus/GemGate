@@ -154,6 +154,10 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 		})
 	}
 	redisConfigured := strings.TrimSpace(state.cfg.Config.RateLimit.Redis.URL) != ""
+	redisMode := ""
+	if state.cfg.Config.RateLimit.Backend == "redis" && redisConfigured {
+		redisMode = redisRateLimitMode(state.cfg.Config.RateLimit.Redis.URL)
+	}
 	telemetry := state.cfg.Config.Telemetry
 	return map[string]any{
 		"server": map[string]any{
@@ -178,6 +182,7 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 			"fail_open": state.cfg.Config.RateLimit.Redis.FailOpen,
 			"redis": map[string]any{
 				"configured": redisConfigured,
+				"mode":       redisMode,
 				"key_prefix": state.cfg.Config.RateLimit.Redis.KeyPrefix,
 				"timeout":    state.cfg.Config.RateLimit.Redis.Timeout,
 			},
