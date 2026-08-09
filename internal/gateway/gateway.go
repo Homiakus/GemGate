@@ -69,6 +69,7 @@ type ConfigSnapshot struct {
 	TrustedProxies              []string
 	DedicatedOperationsAuth     bool
 	RateLimitBackend            string
+	RateLimitMode               string
 	RateLimitFailOpen           bool
 	TelemetryEnabled            bool
 	TelemetryServiceName        string
@@ -192,6 +193,7 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		TrustedProxies:              append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
 		DedicatedOperationsAuth:     state.operationsToken != "",
 		RateLimitBackend:            g.rateLimits.Name(),
+		RateLimitMode:               g.rateLimits.Mode(),
 		RateLimitFailOpen:           g.rateLimits.FailOpen(),
 		TelemetryEnabled:            telemetry.Enabled,
 		TelemetryServiceName:        telemetry.ServiceName,
