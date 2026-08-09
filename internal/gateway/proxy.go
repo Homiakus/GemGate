@@ -154,6 +154,7 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 		})
 	}
 	redisConfigured := strings.TrimSpace(state.cfg.Config.RateLimit.Redis.URL) != ""
+	telemetry := state.cfg.Config.Telemetry
 	return map[string]any{
 		"server": map[string]any{
 			"listen":             state.cfg.Config.Server.Listen,
@@ -180,6 +181,14 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 				"key_prefix": state.cfg.Config.RateLimit.Redis.KeyPrefix,
 				"timeout":    state.cfg.Config.RateLimit.Redis.Timeout,
 			},
+		},
+		"telemetry": map[string]any{
+			"enabled":            telemetry.Enabled,
+			"service_name":       telemetry.ServiceName,
+			"sample_ratio":       telemetry.SampleRatio,
+			"environment":        telemetry.Environment,
+			"propagate_upstream": telemetry.PropagateUpstream,
+			"endpoint_configured": strings.TrimSpace(telemetry.Endpoint) != "",
 		},
 		"default_provider": state.cfg.Config.DefaultProvider,
 		"providers":        providers,
