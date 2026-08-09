@@ -1,14 +1,16 @@
+# GemGate reloads this file and referenced secret files every 5s by default.
+# Change with -reload-interval; use 0 to disable hot reload.
 server:
   listen: ":8080"
   read_timeout: "30s"
   write_timeout: "0s"       # keep 0s for long-lived streaming responses
   idle_timeout: "120s"
-  public_health: true
+  public_health: true         # makes /_healthz and /_readyz public
   request_body_limit: "32MiB"
 
   # Browser CORS policy. Non-browser/server-to-server clients are unaffected.
   # Prefer an explicit allow-list in production. Set enabled: false if browsers
-  # never call GemGate directly.
+  # never call GemGate directly. This policy is hot-reloadable.
   cors:
     enabled: true
     allowed_origins:
@@ -24,12 +26,15 @@ providers:
   - name: gemini
     type: gemini
     api_key: "${GEMINI_API_KEY}"
+    # Alternative for Docker/Kubernetes/systemd credentials and live rotation:
+    # api_key_file: "/run/secrets/gemini_api_key"
     timeout: "0s"
 
   # Uncomment the providers you use. Built-in types supply their standard base_url.
+  # A provider may use api_key OR api_key_file, never both.
   # - name: openai
   #   type: openai
-  #   api_key: "${OPENAI_API_KEY}"
+  #   api_key_file: "/run/secrets/openai_api_key"
   #
   # - name: anthropic
   #   type: anthropic
@@ -68,11 +73,12 @@ providers:
   # - name: local
   #   type: openai-compatible
   #   base_url: "http://127.0.0.1:11434/v1"
-  #   api_key: ""
 
 clients:
   - name: "local-dev"
     token: "${GEMGATE_TOKEN}"
+    # Alternative for live token rotation:
+    # token_file: "/run/secrets/gemgate_token"
     enabled: true
     rate_limit_rpm: 120
 
@@ -80,3 +86,14 @@ logging:
   recent: 300
   log_body: false
   log_headers: false
+
+# Hot-reloadable without dropping in-flight requests:
+# - providers/default_provider, base_url, keys, headers, provider timeout
+# - clients/tokens/enabled/rate_limit_rpm
+# - CORS, request_body_limit, logging.recent
+# Listener and server read/write/idle timeouts require restart.
+#
+# Resilience defaults are deliberately conservative and do not retry requests:
+# - provider circuit opens after 5 consecutive transport/5xx failures
+# - open period: 30s
+# - after cooldown exactly one half-open probe is admitted
