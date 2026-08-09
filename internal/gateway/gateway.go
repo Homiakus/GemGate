@@ -64,6 +64,7 @@ type ConfigSnapshot struct {
 	Listen           string
 	PublicHealth     bool
 	RequestBodyLimit string
+	TrustedProxies   []string
 	UpstreamBaseURL  string // compatibility alias for default provider
 	UpstreamAPIKey   string // compatibility alias for default provider
 	DefaultProvider  string
@@ -163,6 +164,7 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 	return ConfigSnapshot{
 		Listen: state.cfg.Config.Server.Listen, PublicHealth: state.cfg.Config.Server.PublicHealth,
 		RequestBodyLimit: state.cfg.Config.Server.RequestBodyLimit,
+		TrustedProxies:   append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
 		UpstreamBaseURL:  state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
 		DefaultProvider: state.cfg.Config.DefaultProvider, Providers: providers,
 		LogRecent: state.cfg.Config.Logging.Recent, Clients: clients,
@@ -182,6 +184,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	reqID := requestID(r)
+	clientIP := resolveClientIP(state.cfg, r)
 	w.Header().Set("X-Request-ID", reqID)
 
 	if r.URL.Path == "/_healthz" && state.cfg.Config.Server.PublicHealth {
@@ -201,7 +204,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 	if !ok {
 		g.metrics.AuthFailures.Add(1)
 		recordStatus(g.metrics, http.StatusUnauthorized)
-		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "anonymous", Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "auth failed"})
+		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "anonymous", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "auth failed"})
 		http.Error(w, "invalid proxy token", http.StatusUnauthorized)
 		return
 	}
@@ -232,7 +235,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 			retryAfter := max(1, int(reset.Round(time.Second).Seconds()))
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
-		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: auth.Name, Method: r.Method, Path: r.URL.Path, Status: http.StatusTooManyRequests, Duration: time.Since(start), RequestID: reqID, Message: "rate limit exceeded"})
+		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusTooManyRequests, Duration: time.Since(start), RequestID: reqID, Message: "rate limit exceeded"})
 		http.Error(w, "client rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
@@ -266,7 +269,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		message = "client canceled request"
 	}
 	g.logs.Add(LogEntry{
-		Time: start, Level: level, Client: auth.Name, Provider: result.provider,
+		Time: start, Level: level, Client: auth.Name, ClientIP: clientIP, Provider: result.provider,
 		Method: r.Method, Path: r.URL.RequestURI(), Status: result.status, Bytes: result.bytesOut,
 		Duration: time.Since(start), RequestID: reqID, Message: message,
 	})
