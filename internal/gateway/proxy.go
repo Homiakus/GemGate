@@ -69,8 +69,17 @@ func (g *Gateway) proxy(state runtimeSnapshot, w http.ResponseWriter, r *http.Re
 	if result.bytesOut > 0 {
 		g.metrics.BytesOut.Add(uint64(result.bytesOut))
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return result, fmt.Errorf("stream provider %q response: %w", p.name, err)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return result, r.Context().Err()
+		}
+		if !errors.Is(err, context.Canceled) {
+			return result, fmt.Errorf("stream provider %q response: %w", p.name, err)
+		}
+		return result, err
+	}
+	if r.Context().Err() != nil {
+		return result, r.Context().Err()
 	}
 	return result, nil
 }
