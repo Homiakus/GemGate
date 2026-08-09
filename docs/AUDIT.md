@@ -4,7 +4,7 @@ This document records the architectural audit and hardening work merged directly
 
 ## Summary
 
-GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential isolation, multi-provider routing, atomic hot reload, file-backed secrets, dedicated operations auth, exact rolling limits, Redis-distributed quota with Sentinel failover support, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, privacy-bounded OpenTelemetry tracing, modular TUI, cross-platform release packaging and provider-shaped integration tests.
+GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential isolation, multi-provider routing, atomic hot reload, file-backed secrets, dedicated operations auth, exact rolling limits, Redis-distributed quota with tested Sentinel failover, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, privacy-bounded OpenTelemetry tracing, modular TUI, cross-platform release packaging and provider-shaped integration tests.
 
 The project deliberately remains a reverse proxy. It does not translate provider schemas, hide billable retries, or capture prompts/completions for logging or tracing.
 
@@ -21,13 +21,13 @@ The project deliberately remains a reverse proxy. It does not translate provider
 | Medium | HTTP | Public errors could reveal transport detail or double-write after streaming began. | Fixed: generic client errors plus response-start tracking. |
 | Medium | HTTP | Hop-by-hop/forwarding headers were insufficiently sanitized. | Fixed: dynamic `Connection` filtering, trusted forwarding reconstruction and explicit tracing-header boundary. |
 | Medium | Redirect security | Provider HTTP redirects could trigger hidden follow-up requests with server-side credentials. | Fixed: provider clients never auto-follow redirects; `3xx + Location` passes through to the caller. |
-| Medium | Quality | No complete repository CI. | Fixed: module verification, gofmt diagnostics, vet, race/coverage tests, build, Redis service integration and release-packaging smoke. |
+| Medium | Quality | No complete repository CI. | Fixed: module verification, gofmt diagnostics, vet, race/coverage tests, build, Redis service integration, Sentinel promotion E2E and release-packaging smoke. |
 | Medium | TUI | Large Gemini-centric model/UI. | Fixed: focused views including provider/circuit/rate-limit/operations-auth/tracing state. |
 | Medium | Rate limit | Fixed window allowed boundary bursts. | Fixed: exact rolling one-minute in-memory window. |
 | Medium | Distributed quota | Client RPM state was local to one process. | Fixed: optional Redis backend shares one rolling quota across replicas; memory remains default. |
 | Medium | Distributed security | Shared limiter could expose client tokens in external keys. | Fixed: Redis keys use a truncated SHA-256 token identifier; raw bearer tokens are not key material. |
 | Medium | Distributed failure policy | External limiter outage semantics were undefined. | Fixed: fail-closed by default, explicit `fail_open`, warning logs and backend-error metric. |
-| Medium | Redis HA | A shared Redis limiter could still be pinned to one Redis master. | Fixed: URLs carrying `master_name` select go-redis Sentinel failover mode; seed sentinels can be supplied with repeated `addr=` values. |
+| Medium | Redis HA | A shared Redis limiter could still be pinned to one Redis master. | Fixed and E2E-tested: URLs carrying `master_name` select go-redis Sentinel failover mode; forced promotion preserves limiter continuity through the same failover client. |
 | Medium | CORS | Wildcard origin was unconditional. | Fixed: allow-list, disable switch, preflight validation, credentials policy and max-age. |
 | Medium | Proxy trust | Forwarded client IP could be spoofed if consumed naively. | Fixed: explicit trusted CIDR/IP chain and sanitized upstream forwarding headers. |
 | Medium | Resilience | Repeated transport/5xx failures continuously hit a failing provider. | Fixed: configurable closed/open/half-open circuit breaker with no automatic request replay. |
@@ -37,9 +37,8 @@ The project deliberately remains a reverse proxy. It does not translate provider
 | Medium | Release | No repeatable multi-platform release/provenance path. | Fixed: shared build script, six targets, version injection, checksums, SPDX SBOM and GitHub artifact attestations on version tags. |
 | Low | Logging config | `log_body` / `log_headers` existed but did nothing. | Fixed: legacy false values remain compatible; true is explicitly rejected until a redaction contract exists. |
 | Low | Tracing | No distributed tracing/OpenTelemetry. | Fixed: optional OTLP/HTTP request/provider spans with strict metadata-only privacy boundary and explicit upstream Trace Context propagation. |
-| Low | Redis HA verification | Fast CI does not promote a real Sentinel-managed Redis primary. | Open operational test: unit/race CI verifies failover URL selection and parsing; topology-specific promotion drills remain deployment work. |
 | Low | Redis Cluster | Native Redis Cluster routing is not implemented. | Open by design; Sentinel failover and stable managed-primary endpoints are supported. |
-| Low | Streaming edges | Large SSE flush, unknown-length body limit and abrupt post-header disconnect are covered; malformed framing/provider-specific teardown cases can still be expanded. | Partially open. |
+| Low | Streaming edges | Large SSE flush, unknown-length body limit, truncated fixed-length bodies and malformed chunked disconnects are covered. | Mostly fixed; provider-specific exotic framing/teardown cases can still be expanded. |
 
 ## Current runtime boundaries
 
@@ -75,9 +74,11 @@ See `docs/OPERATIONS.md`.
 
 ## Distributed rate-limit result
 
-`memory` remains the zero-dependency default. `redis` is opt-in for horizontally scaled deployments. The Redis path uses one atomic Lua operation and Redis server time. CI starts a real Redis service and verifies under the race detector that independent limiter instances observe one shared quota.
+`memory` remains the zero-dependency default. `redis` is opt-in for horizontally scaled deployments. The Redis path uses one atomic Lua operation and Redis server time. Normal CI starts a real Redis service and verifies under the race detector that independent limiter instances observe one shared quota.
 
 When the secret Redis URL includes `master_name`, GemGate constructs a native go-redis Sentinel failover client instead of a fixed standalone client. Repeated `addr=` query values provide additional Sentinel seeds. `/_config` and TUI expose only `standalone`/`sentinel` mode, not Redis addresses or credentials. Stable managed-primary endpoints continue to use normal Redis mode.
+
+The dedicated Sentinel E2E workflow starts a master, replica and three Sentinel processes, records limiter state, forces `SENTINEL FAILOVER`, waits for a different master, then verifies that the same GemGate failover client reconnects and sees the pre-promotion quota state.
 
 See `docs/RATE_LIMITING.md`.
 
@@ -99,11 +100,11 @@ go test -race -cover ./...
 go build ./cmd/gemgate
 ```
 
-CI additionally starts Redis and exercises release cross-compilation/version injection. Tracing regression tests enforce the no-secrets/no-body/no-query span contract and opt-in upstream propagation. Redis unit tests verify standalone/Sentinel URL selection and reject malformed failover options before serving requests.
+CI additionally starts Redis and exercises release cross-compilation/version injection. Tracing regression tests enforce the no-secrets/no-body/no-query span contract and opt-in upstream propagation. Redis unit tests verify standalone/Sentinel URL selection and reject malformed failover options before serving requests. The separate Sentinel E2E workflow verifies forced master promotion and limiter-state continuity.
 
 ## Recommended next iteration
 
-1. Add a dedicated multi-container Sentinel promotion workflow to exercise real master failover end-to-end.
-2. Expand malformed streaming/provider-specific framing and connection-teardown integration tests.
+1. Expand provider-specific streaming/framing and connection-teardown integration tests beyond the generic malformed chunked case.
+2. Consider native Redis Cluster routing only if a deployment actually needs sharded limiter storage.
 3. Consider OTLP metrics/exemplars only if they add operational value beyond the existing Prometheus surface.
 4. Consider a separate operations listener only if deployments need network-level control-plane isolation beyond token auth.
