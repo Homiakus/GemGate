@@ -4,7 +4,7 @@ This document records the architectural audit and hardening work merged directly
 
 ## Summary
 
-GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential isolation, multi-provider routing, atomic hot reload, file-backed secrets, dedicated operations auth, exact rolling limits, Redis-distributed quota with tested Sentinel failover, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, privacy-bounded OpenTelemetry tracing, modular TUI, cross-platform release packaging and provider-shaped integration tests.
+GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential and network control-plane isolation, multi-provider routing, atomic hot reload, file-backed secrets, exact rolling limits, Redis-distributed quota with tested Sentinel failover, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, privacy-bounded OpenTelemetry tracing, modular TUI, cross-platform release packaging and provider-shaped integration tests.
 
 The project deliberately remains a reverse proxy. It does not translate provider schemas, hide billable retries, or capture prompts/completions for logging or tracing.
 
@@ -14,7 +14,7 @@ The project deliberately remains a reverse proxy. It does not translate provider
 | --- | --- | --- | --- |
 | High | Security | Client and provider credentials were coupled to Gemini-specific proxy logic. | Fixed: inbound provider credentials are stripped; selected provider auth is injected server-side. |
 | High | Architecture | One `upstream` was embedded across config/gateway/UI. | Fixed: provider catalog, named routing and backward-compatible legacy normalization. |
-| High | Control plane | Any application client token could read protected metrics/config operational surfaces. | Fixed: optional dedicated operations token separates control-plane endpoints from application proxy credentials while preserving legacy fallback when omitted. |
+| High | Control plane | Application credentials and network surface could reach operational endpoints. | Fixed: dedicated operations token separates credentials; optional `-operations-listen` removes operational routes from the application port and removes provider routes from the operations port. |
 | Medium | Config | Unknown YAML fields were silently accepted. | Fixed with strict `KnownFields(true)` plus strict telemetry subfield validation. |
 | Medium | Secrets | Key/token rotation required restart. | Fixed for provider/client/operations credentials with file-backed secrets and atomic reload. |
 | Medium | Runtime | Live config could have been partially mutated. | Fixed: validate/build complete candidate, then atomic snapshot swap. |
@@ -46,7 +46,8 @@ The project deliberately remains a reverse proxy. It does not translate provider
 - `internal/provider` — provider metadata and authentication contract;
 - `internal/telemetry` — process-scoped OpenTelemetry SDK/OTLP bootstrap;
 - `internal/gateway/runtime.go` — immutable request runtime and atomic reload;
-- `internal/gateway/operations_auth.go` — control-plane authentication boundary;
+- `internal/gateway/operations_auth.go` — control-plane credential boundary;
+- `internal/gateway/operations_listener.go` — application/control-plane network handler separation;
 - `internal/gateway/tracing.go` — bounded inbound request span metadata;
 - `internal/gateway/proxy.go` — routing/auth/upstream streaming and redacted config view;
 - `internal/gateway/ratelimit*.go` — memory/Redis/Sentinel rolling quota backends;
@@ -56,6 +57,14 @@ The project deliberately remains a reverse proxy. It does not translate provider
 - `internal/gateway/health.go` / `readiness.go` — local operational endpoints;
 - `internal/tui` — presentation only.
 
+## Control-plane result
+
+With `operations.token` or `operations.token_file` configured, `/_metrics`, `/_config` and private health/readiness require the dedicated operations bearer token. Application tokens cannot use those surfaces; the operations token cannot proxy AI requests. Token rotation is hot-reloadable through the same complete runtime swap.
+
+With `-operations-listen`, GemGate additionally creates a network boundary: operational paths return 404 on the application listener, while application/provider paths return 404 on the operations listener. Handler isolation is configured before either listener starts serving, avoiding a startup exposure window. Public health/readiness, when explicitly enabled, remain public only on the operations handler after network isolation.
+
+See `docs/OPERATIONS.md`.
+
 ## OpenTelemetry result
 
 OpenTelemetry traces use OTLP/HTTP and are process-scoped/restart-only. Request spans record method, path without query, request ID, auth domain/client name, rate-limit policy, selected provider, status and normalized outcome. Provider spans stay alive through response-body EOF/Close so streaming duration is measured instead of only time-to-headers.
@@ -63,14 +72,6 @@ OpenTelemetry traces use OTLP/HTTP and are process-scoped/restart-only. Request 
 Regression tests verify that query values, request bodies, application tokens, provider keys and arbitrary headers do not appear in span attributes. Incoming tracing headers are stripped at the provider boundary. Upstream propagation is disabled by default; when explicitly enabled only W3C Trace Context is injected. Baggage is never forwarded. Redacted operator surfaces expose only safe telemetry state and never the collector endpoint or exporter credentials.
 
 See `docs/OBSERVABILITY.md`.
-
-## Operations-auth result
-
-With `operations.token` or `operations.token_file` configured, `/_metrics`, `/_config` and private health/readiness require the dedicated operations bearer token. Application tokens cannot use those surfaces; the operations token cannot proxy AI requests. Token rotation is hot-reloadable through the same complete runtime swap.
-
-When `operations:` is omitted, historical client-token access to protected operational endpoints remains available for compatibility. Production deployments should opt into dedicated operations auth.
-
-See `docs/OPERATIONS.md`.
 
 ## Distributed rate-limit result
 
@@ -100,11 +101,10 @@ go test -race -cover ./...
 go build ./cmd/gemgate
 ```
 
-CI additionally starts Redis and exercises release cross-compilation/version injection. Tracing regression tests enforce the no-secrets/no-body/no-query span contract and opt-in upstream propagation. Redis unit tests verify standalone/Sentinel URL selection and reject malformed failover options before serving requests. The separate Sentinel E2E workflow verifies forced master promotion and limiter-state continuity.
+CI additionally starts Redis and exercises release cross-compilation/version injection. Tracing regression tests enforce the no-secrets/no-body/no-query span contract and opt-in upstream propagation. Control-plane tests verify that isolated operations handlers cannot proxy AI traffic and that application handlers hide operational paths. The separate Sentinel E2E workflow verifies forced master promotion and limiter-state continuity.
 
 ## Recommended next iteration
 
 1. Expand provider-specific streaming/framing and connection-teardown integration tests beyond the generic malformed chunked case.
 2. Consider native Redis Cluster routing only if a deployment actually needs sharded limiter storage.
 3. Consider OTLP metrics/exemplars only if they add operational value beyond the existing Prometheus surface.
-4. Consider a separate operations listener only if deployments need network-level control-plane isolation beyond token auth.
