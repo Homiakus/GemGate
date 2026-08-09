@@ -40,6 +40,21 @@ func (w *rateWindow) allow(limit int, now time.Time) (bool, time.Duration) {
 	return true, 0
 }
 
+func (w *rateWindow) resetAfter(now time.Time) time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.prune(now)
+	w.syncCompatFields()
+	if len(w.requests) == 0 {
+		return 0
+	}
+	reset := time.Minute - now.Sub(w.requests[0])
+	if reset < 0 {
+		return 0
+	}
+	return reset
+}
+
 func (w *rateWindow) prune(now time.Time) {
 	if len(w.requests) == 0 {
 		return
