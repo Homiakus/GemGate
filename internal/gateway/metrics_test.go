@@ -16,13 +16,14 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestProviderMetricsTransportRecordsCompletedResponse(t *testing.T) {
 	metrics := NewMetrics()
+	breaker := newCircuitBreaker(defaultCircuitFailureThreshold, defaultCircuitOpenFor)
 	transport := newProviderMetricsTransport("openai", roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("ok")),
 			Header:     make(http.Header),
 		}, nil
-	}), metrics)
+	}), metrics, breaker)
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.test/v1/models", nil)
 	if err != nil {
