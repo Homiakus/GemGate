@@ -76,10 +76,7 @@ type MetricsSnapshot struct {
 }
 
 func NewMetrics() *Metrics {
-	return &Metrics{
-		StartedAt: time.Now(),
-		providers: make(map[string]*providerMetrics),
-	}
+	return &Metrics{StartedAt: time.Now(), providers: make(map[string]*providerMetrics)}
 }
 
 func (m *Metrics) Snapshot() MetricsSnapshot {
@@ -97,7 +94,6 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		AuthFailures:   m.AuthFailures.Load(),
 		RateLimited:    m.RateLimited.Load(),
 		Providers:      m.providerSnapshots(),
-		Circuits:       m.CircuitSnapshots(),
 	}
 }
 
@@ -118,7 +114,6 @@ func (m *Metrics) providerFinish(name string, status int, duration time.Duration
 	p := m.provider(name)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	if p.inFlight > 0 {
 		p.inFlight--
 	}
@@ -127,7 +122,6 @@ func (m *Metrics) providerFinish(name string, status int, duration time.Duration
 	p.lastDuration = duration
 	p.lastStatus = status
 	p.lastRequest = time.Now()
-
 	switch {
 	case status >= 200 && status < 300:
 		p.requests2xx++
@@ -139,7 +133,6 @@ func (m *Metrics) providerFinish(name string, status int, duration time.Duration
 	if transportError {
 		p.transportErrors++
 	}
-
 	if transportError || status >= 500 {
 		p.consecutiveFailures++
 	} else {
@@ -154,7 +147,6 @@ func (m *Metrics) provider(name string) *providerMetrics {
 	if p != nil {
 		return p
 	}
-
 	m.providersMu.Lock()
 	defer m.providersMu.Unlock()
 	if p = m.providers[name]; p == nil {
@@ -180,18 +172,10 @@ func (m *Metrics) providerSnapshots() []ProviderMetricsSnapshot {
 		p := entries[name]
 		p.mu.Lock()
 		s := ProviderMetricsSnapshot{
-			Name:                name,
-			Requests:            p.requests,
-			Requests2xx:         p.requests2xx,
-			Requests4xx:         p.requests4xx,
-			Requests5xx:         p.requests5xx,
-			TransportErrors:     p.transportErrors,
-			InFlight:            p.inFlight,
-			TotalDuration:       p.duration,
-			LastDuration:        p.lastDuration,
-			LastStatus:          p.lastStatus,
-			LastRequest:         p.lastRequest,
-			ConsecutiveFailures: p.consecutiveFailures,
+			Name: name, Requests: p.requests, Requests2xx: p.requests2xx, Requests4xx: p.requests4xx,
+			Requests5xx: p.requests5xx, TransportErrors: p.transportErrors, InFlight: p.inFlight,
+			TotalDuration: p.duration, LastDuration: p.lastDuration, LastStatus: p.lastStatus,
+			LastRequest: p.lastRequest, ConsecutiveFailures: p.consecutiveFailures,
 		}
 		if p.requests > 0 {
 			s.AverageDuration = p.duration / time.Duration(p.requests)
@@ -276,7 +260,6 @@ gemgate_upstream_errors_total %d
 			fmt.Fprintf(&b, "gemgate_provider_consecutive_failures{provider=\"%s\"} %d\n", label, p.ConsecutiveFailures)
 		}
 	}
-
 	if len(s.Circuits) > 0 {
 		b.WriteString(`# HELP gemgate_provider_circuit_state Current circuit-breaker state; exactly one state series per provider has value 1.
 # TYPE gemgate_provider_circuit_state gauge
