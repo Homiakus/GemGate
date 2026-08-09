@@ -11,6 +11,7 @@ type LogEntry struct {
 	Time      time.Time
 	Level     string
 	Client    string
+	ClientIP  string
 	Provider  string
 	Method    string
 	Path      string
@@ -90,10 +91,15 @@ func (e LogEntry) Line() string {
 	if provider == "" {
 		provider = "-"
 	}
-	return fmt.Sprintf("%s %-5s %-10s %-10s %3d %7s %s %s",
+	clientIP := strings.TrimSpace(e.ClientIP)
+	if clientIP == "" {
+		clientIP = "-"
+	}
+	return fmt.Sprintf("%s %-5s %-10s %-15s %-10s %3d %7s %s %s",
 		e.Time.Format("15:04:05"),
 		strings.ToUpper(e.Level),
 		e.Client,
+		clientIP,
 		provider,
 		e.Status,
 		e.Duration.Round(time.Millisecond),
