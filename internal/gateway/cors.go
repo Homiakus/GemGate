@@ -22,9 +22,8 @@ type corsHandler struct {
 	maxAgeSeconds    int
 }
 
-func newCORSHandler(next http.Handler, cfg config.CORSConfig, maxAge time.Duration) http.Handler {
+func newCORSPolicy(cfg config.CORSConfig, maxAge time.Duration) *corsHandler {
 	h := &corsHandler{
-		next:             next,
 		enabled:          cfg.IsEnabled(),
 		allowedOrigins:   make(map[string]struct{}, len(cfg.AllowedOrigins)),
 		allowedMethods:   make(map[string]struct{}, len(cfg.AllowedMethods)),
@@ -67,10 +66,27 @@ func newCORSHandler(next http.Handler, cfg config.CORSConfig, maxAge time.Durati
 	return h
 }
 
+func newCORSHandler(next http.Handler, cfg config.CORSConfig, maxAge time.Duration) http.Handler {
+	h := newCORSPolicy(cfg, maxAge)
+	h.next = next
+	return h
+}
+
 func (h *corsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.enabled {
-		h.next.ServeHTTP(w, r)
+	if h.handle(w, r) {
 		return
+	}
+	if h.next != nil {
+		h.next.ServeHTTP(w, r)
+	}
+}
+
+// handle applies CORS headers and returns true when the request has been fully
+// handled (preflight success/rejection). Ordinary requests return false so the
+// caller can continue with the same immutable runtime snapshot.
+func (h *corsHandler) handle(w http.ResponseWriter, r *http.Request) bool {
+	if h == nil || !h.enabled {
+		return false
 	}
 
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
@@ -82,7 +98,7 @@ func (h *corsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.allowOrigin(w, origin) {
 			if preflight {
 				http.Error(w, "CORS origin is not allowed", http.StatusForbidden)
-				return
+				return true
 			}
 		} else {
 			h.writeCommonHeaders(w)
@@ -92,19 +108,19 @@ func (h *corsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if preflight {
 		if !h.methodAllowed(r.Header.Get("Access-Control-Request-Method")) {
 			http.Error(w, "CORS method is not allowed", http.StatusForbidden)
-			return
+			return true
 		}
 		if !h.headersAllowed(r.Header.Get("Access-Control-Request-Headers")) {
 			http.Error(w, "CORS request header is not allowed", http.StatusForbidden)
-			return
+			return true
 		}
 		appendVary(w.Header(), "Access-Control-Request-Method")
 		appendVary(w.Header(), "Access-Control-Request-Headers")
 		w.WriteHeader(http.StatusNoContent)
-		return
+		return true
 	}
 
-	h.next.ServeHTTP(w, r)
+	return false
 }
 
 func (h *corsHandler) allowOrigin(w http.ResponseWriter, origin string) bool {
