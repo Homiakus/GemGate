@@ -64,9 +64,10 @@ func (t *providerMetricsTransport) RoundTrip(req *http.Request) (*http.Response,
 	}
 	resp.Body = &providerMetricsBody{
 		ReadCloser: resp.Body,
-		done: func() {
-			t.metrics.providerFinish(t.provider, resp.StatusCode, time.Since(start), false)
-			t.breaker.finish(permit, resp.StatusCode >= 500, time.Now())
+		done: func(bodyErr error) {
+			transportError := bodyErr != nil && !downstreamRequestAborted(req.Context())
+			t.metrics.providerFinish(t.provider, resp.StatusCode, time.Since(start), transportError)
+			t.breaker.finish(permit, transportError || resp.StatusCode >= 500, time.Now())
 		},
 	}
 	return resp, nil
@@ -75,23 +76,27 @@ func (t *providerMetricsTransport) RoundTrip(req *http.Request) (*http.Response,
 type providerMetricsBody struct {
 	io.ReadCloser
 	once sync.Once
-	done func()
+	done func(error)
 }
 
 func (b *providerMetricsBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
-		b.finish()
+		if err == io.EOF {
+			b.finish(nil)
+		} else {
+			b.finish(err)
+		}
 	}
 	return n, err
 }
 
 func (b *providerMetricsBody) Close() error {
 	err := b.ReadCloser.Close()
-	b.finish()
+	b.finish(err)
 	return err
 }
 
-func (b *providerMetricsBody) finish() {
-	b.once.Do(b.done)
+func (b *providerMetricsBody) finish(err error) {
+	b.once.Do(func() { b.done(err) })
 }
