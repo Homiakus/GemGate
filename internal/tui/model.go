@@ -99,8 +99,17 @@ func New(gw *gateway.Gateway) Model {
 	}
 
 	styles := table.DefaultStyles()
-	styles.Header = styles.Header.Bold(true).Foreground(lipgloss.Color("#c4b5fd")).Background(lipgloss.Color("#0f172a")).BorderStyle(lipgloss.NormalBorder()).BorderBottom(true).BorderForeground(lipgloss.Color("#334155"))
-	styles.Selected = styles.Selected.Bold(true).Foreground(lipgloss.Color("#f8fafc")).Background(lipgloss.Color("#4c1d95"))
+	styles.Header = styles.Header.
+		Bold(true).
+		Foreground(lipgloss.Color("#c4b5fd")).
+		Background(lipgloss.Color("#0f172a")).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderBottom(true).
+		BorderForeground(lipgloss.Color("#334155"))
+	styles.Selected = styles.Selected.
+		Bold(true).
+		Foreground(lipgloss.Color("#f8fafc")).
+		Background(lipgloss.Color("#4c1d95"))
 	styles.Cell = styles.Cell.Foreground(lipgloss.Color("#dbeafe"))
 
 	logTable := table.New(
@@ -235,7 +244,7 @@ func (m Model) headerView() string {
 	status := statusOKStyle.Render(" LIVE ")
 	if m.paused {
 		status = statusPausedStyle.Render(" PAUSED ")
-	} else if m.metrics.Requests5xx > 0 || m.metrics.UpstreamErrors > 0 || providerAttentionCount(m.metrics.Providers) > 0 {
+	} else if m.metrics.Requests5xx > 0 || m.metrics.UpstreamErrors > 0 || providerAttentionCount(m.metrics.Providers, m.metrics.Circuits) > 0 {
 		status = statusWarnStyle.Render(" DEGRADED ")
 	}
 
