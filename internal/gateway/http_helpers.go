@@ -43,6 +43,12 @@ var forwardingHeaders = map[string]struct{}{
 	"x-real-ip":         {},
 }
 
+var tracingHeaders = map[string]struct{}{
+	"traceparent": {},
+	"tracestate":  {},
+	"baggage":     {},
+}
+
 func copyRequestHeaders(dst, src http.Header) {
 	connectionHeaders := connectionHeaderNames(src)
 	for k, values := range src {
@@ -57,6 +63,9 @@ func copyRequestHeaders(dst, src http.Header) {
 			continue
 		}
 		if _, forwarding := forwardingHeaders[lk]; forwarding {
+			continue
+		}
+		if _, tracing := tracingHeaders[lk]; tracing {
 			continue
 		}
 		for _, v := range values {
@@ -88,7 +97,6 @@ func connectionHeaderNames(h http.Header) map[string]struct{} {
 			if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
 				out[name] = struct{}{}
 			}
-		}
 	}
 	return out
 }
