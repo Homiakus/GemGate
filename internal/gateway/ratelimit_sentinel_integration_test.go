@@ -23,9 +23,9 @@ func TestRedisSentinelFailoverKeepsLimiterAvailable(t *testing.T) {
 	defer cancel()
 
 	sentinel := redis.NewSentinelClient(&redis.Options{
-		Addr:        sentinelAddr,
-		DialTimeout: time.Second,
-		ReadTimeout: time.Second,
+		Addr:         sentinelAddr,
+		DialTimeout:  time.Second,
+		ReadTimeout:  time.Second,
 		WriteTimeout: time.Second,
 	})
 	defer sentinel.Close()
