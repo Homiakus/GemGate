@@ -95,17 +95,15 @@ func run(withTUI bool, args []string) error {
 		return err
 	}
 
-	serverErr := make(chan error, 2)
-	go func() { serverErr <- gw.ListenAndServe() }()
-
 	var operationsServer *http.Server
+	var operationsListener net.Listener
 	operationsAddr := strings.TrimSpace(*operationsListen)
 	if operationsAddr != "" {
 		if operationsAddr == strings.TrimSpace(rt.Config.Server.Listen) {
 			_ = shutdown(gw, nil)
 			return fmt.Errorf("operations-listen must differ from server.listen")
 		}
-		listener, err := net.Listen("tcp", operationsAddr)
+		operationsListener, err = net.Listen("tcp", operationsAddr)
 		if err != nil {
 			_ = shutdown(gw, nil)
 			return fmt.Errorf("listen operations endpoint %q: %w", operationsAddr, err)
@@ -120,9 +118,16 @@ func run(withTUI bool, args []string) error {
 			IdleTimeout:       rt.IdleTimeout,
 			MaxHeaderBytes:    1 << 20,
 		}
+	}
+
+	// All handler composition and listener binding is complete before either
+	// server starts accepting requests. This avoids an isolation window/data race.
+	serverErr := make(chan error, 2)
+	go func() { serverErr <- gw.ListenAndServe() }()
+	if operationsServer != nil {
 		go func() {
 			log.Printf("operations listener on %s", operationsAddr)
-			err := operationsServer.Serve(listener)
+			err := operationsServer.Serve(operationsListener)
 			if errors.Is(err, http.ErrServerClosed) {
 				err = nil
 			}
