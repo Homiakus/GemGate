@@ -43,6 +43,41 @@ func TestCircuitBreakerHalfOpenRecovery(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerCloneChangesPolicyWithoutMutatingOld(t *testing.T) {
+	old := newCircuitBreaker(5, 30*time.Second)
+	now := time.Unix(100, 0)
+	for i := 0; i < 3; i++ {
+		permit, ok, _ := old.allow(now.Add(time.Duration(i) * time.Second))
+		if !ok {
+			t.Fatal("old breaker rejected before threshold")
+		}
+		old.finish(permit, true, now.Add(time.Duration(i)*time.Second))
+	}
+
+	next := old.cloneWithPolicy(circuitPolicy{enabled: true, failureThreshold: 2, openFor: 5 * time.Second}, now.Add(4*time.Second))
+	if got := next.snapshot(now.Add(4 * time.Second)).State; got != string(circuitOpen) {
+		t.Fatalf("new lower-threshold policy should open cloned circuit, state=%s", got)
+	}
+	if got := old.snapshot(now.Add(4 * time.Second)).State; got != string(circuitClosed) {
+		t.Fatalf("old in-flight snapshot was mutated, state=%s", got)
+	}
+}
+
+func TestDisabledCircuitAlwaysAllows(t *testing.T) {
+	breaker := newCircuitBreakerWithPolicy(circuitPolicy{enabled: false, failureThreshold: 1, openFor: time.Second})
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		permit, ok, _ := breaker.allow(now)
+		if !ok {
+			t.Fatal("disabled circuit rejected request")
+		}
+		breaker.finish(permit, true, now)
+	}
+	if got := breaker.snapshot(now).State; got != "disabled" {
+		t.Fatalf("disabled circuit state=%s", got)
+	}
+}
+
 func TestProviderTransportStopsCallingOpenCircuit(t *testing.T) {
 	var calls atomic.Int64
 	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -55,7 +90,8 @@ func TestProviderTransportStopsCallingOpenCircuit(t *testing.T) {
 		}, nil
 	})
 	metrics := NewMetrics()
-	transport := newProviderMetricsTransport("test-provider", base, metrics)
+	breaker := newCircuitBreaker(defaultCircuitFailureThreshold, defaultCircuitOpenFor)
+	transport := newProviderMetricsTransport("test-provider", base, metrics, breaker)
 
 	for i := 0; i < defaultCircuitFailureThreshold; i++ {
 		req, _ := http.NewRequest(http.MethodPost, "https://provider.test/v1/generate", nil)
