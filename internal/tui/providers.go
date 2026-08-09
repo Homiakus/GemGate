@@ -12,22 +12,25 @@ import (
 func (m Model) providersView() string {
 	w := m.contentWidth()
 	byName := providerMetricsByName(m.metrics.Providers)
-	header := labelStyle.Render(fmt.Sprintf("%-18s %-17s %-10s %-11s %-8s %-9s %-9s %-11s",
-		"Provider", "Type", "Role", "Health", "Req", "Error", "In-flight", "Avg"))
+	circuits := providerCircuitsByName(m.metrics.Circuits)
+	header := labelStyle.Render(fmt.Sprintf("%-17s %-15s %-9s %-10s %-10s %-7s %-8s %-8s %-10s",
+		"Provider", "Type", "Role", "Health", "Circuit", "Req", "Error", "Flight", "Avg"))
 	lines := []string{header}
 
 	for _, p := range m.cfg.Providers {
 		pm := byName[p.Name]
+		circuit := circuits[p.Name]
 		role := "named"
 		if p.Name == m.cfg.DefaultProvider {
 			role = "default"
 		}
 		errorRate := providerErrorRate(pm)
-		lines = append(lines, fmt.Sprintf("%-18s %-17s %-10s %-11s %-8d %-9s %-9d %-11s",
-			textStyle.Render(truncate(p.Name, 17)),
-			mutedStyle.Render(truncate(p.Type, 16)),
+		lines = append(lines, fmt.Sprintf("%-17s %-15s %-9s %-10s %-10s %-7d %-8s %-8d %-10s",
+			textStyle.Render(truncate(p.Name, 16)),
+			mutedStyle.Render(truncate(p.Type, 14)),
 			providerRoleText(role),
 			providerHealthText(pm.Health),
+			providerCircuitText(circuit.State),
 			pm.Requests,
 			providerErrorText(errorRate, pm),
 			pm.InFlight,
@@ -39,16 +42,16 @@ func (m Model) providersView() string {
 	}
 
 	baseURL := localBaseURL(m.cfg.Listen)
-	quick := hintBoxStyle.Width(min(w-8, 100)).Render(lipgloss.JoinVertical(lipgloss.Left,
-		subtitleStyle.Render("Routing"),
+	quick := hintBoxStyle.Width(min(w-8, 104)).Render(lipgloss.JoinVertical(lipgloss.Left,
+		subtitleStyle.Render("Routing & resilience"),
 		codeStyle.Render("Default: "+baseURL+"/<provider-path>"),
 		codeStyle.Render("Named:   "+baseURL+"/providers/{name}/<provider-path>"),
-		mutedStyle.Render("Health is passive: transport/5xx streaks only; it is not an active readiness probe."),
+		mutedStyle.Render("Circuit: 5 consecutive transport/5xx failures -> 30s open -> one half-open probe. No automatic retries."),
 	))
 
 	return boxStyle.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left,
 		subtitleStyle.Render("Providers"),
-		mutedStyle.Render("Provider-level status is measured around the full streamed response lifecycle."),
+		mutedStyle.Render("Health and circuit state are passive and measured around the full streamed response lifecycle."),
 		"", strings.Join(lines, "\n"), "", quick,
 	))
 }
@@ -57,6 +60,14 @@ func providerMetricsByName(items []gateway.ProviderMetricsSnapshot) map[string]g
 	out := make(map[string]gateway.ProviderMetricsSnapshot, len(items))
 	for _, p := range items {
 		out[p.Name] = p
+	}
+	return out
+}
+
+func providerCircuitsByName(items []gateway.CircuitSnapshot) map[string]gateway.CircuitSnapshot {
+	out := make(map[string]gateway.CircuitSnapshot, len(items))
+	for _, c := range items {
+		out[c.Provider] = c
 	}
 	return out
 }
@@ -99,6 +110,19 @@ func providerHealthText(health string) string {
 		return badStyle.Render(health)
 	default:
 		return mutedStyle.Render("unknown")
+	}
+}
+
+func providerCircuitText(state string) string {
+	switch state {
+	case "closed":
+		return okStyle.Render(state)
+	case "half_open":
+		return warnStyle.Render("half-open")
+	case "open":
+		return badStyle.Render(state)
+	default:
+		return mutedStyle.Render("closed")
 	}
 }
 
