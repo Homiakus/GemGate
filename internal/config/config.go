@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ type ServerConfig struct {
 	IdleTimeout      string     `yaml:"idle_timeout"`
 	PublicHealth     bool       `yaml:"public_health"`
 	RequestBodyLimit string     `yaml:"request_body_limit"`
+	TrustedProxies   []string   `yaml:"trusted_proxies,omitempty"`
 	CORS             CORSConfig `yaml:"cors,omitempty"`
 }
 
@@ -109,6 +111,7 @@ type Runtime struct {
 	UpstreamTimeout  time.Duration // default provider timeout, kept for compatibility
 	ProviderTimeouts map[string]time.Duration
 	ProviderCircuits map[string]CircuitBreakerRuntime
+	TrustedProxies   []netip.Prefix
 	RequestBodyLimit int64
 	CORSMaxAge       time.Duration
 }
@@ -161,6 +164,9 @@ func Load(path string) (Runtime, error) {
 	if rt.CORSMaxAge, err = parseDuration(cfg.Server.CORS.MaxAge); err != nil {
 		return Runtime{}, fmt.Errorf("server.cors.max_age: %w", err)
 	}
+	if rt.TrustedProxies, err = parseTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return Runtime{}, fmt.Errorf("server.trusted_proxies: %w", err)
+	}
 	for _, p := range cfg.Providers {
 		d, parseErr := parseDuration(p.Timeout)
 		if parseErr != nil {
@@ -203,6 +209,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.RequestBodyLimit == "" {
 		cfg.Server.RequestBodyLimit = "32MiB"
+	}
+	for i := range cfg.Server.TrustedProxies {
+		cfg.Server.TrustedProxies[i] = strings.TrimSpace(cfg.Server.TrustedProxies[i])
 	}
 	if cfg.Server.CORS.Enabled == nil {
 		enabled := true
@@ -498,6 +507,46 @@ func validateCORS(cfg CORSConfig, maxAge time.Duration) error {
 		return errors.New("server.cors.max_age must not be negative")
 	}
 	return nil
+}
+
+func parseTrustedProxies(values []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(values))
+	seen := make(map[netip.Prefix]struct{}, len(values))
+	for _, raw := range values {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil, errors.New("contains an empty entry")
+		}
+		var prefix netip.Prefix
+		if strings.Contains(raw, "/") {
+			parsed, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", raw, err)
+			}
+			prefix = parsed.Masked()
+		} else {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid IP %q: %w", raw, err)
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Addr().Is4In6() {
+			addr := prefix.Addr().Unmap()
+			bits := prefix.Bits() - 96
+			if bits < 0 {
+				bits = 0
+			}
+			prefix = netip.PrefixFrom(addr, bits).Masked()
+		}
+		if _, exists := seen[prefix]; exists {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		out = append(out, prefix)
+	}
+	return out, nil
 }
 
 func parseDuration(s string) (time.Duration, error) {
