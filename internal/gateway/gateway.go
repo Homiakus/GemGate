@@ -157,7 +157,7 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		providers = append(providers, ProviderSnapshot{
 			Name: p.Name, Type: p.Type, BaseURL: p.BaseURL, APIKey: redact(p.APIKey), Timeout: p.Timeout,
 			OpenAICompatible: spec.OpenAICompatible,
-			CircuitEnabled: policy.enabled, CircuitFailureThreshold: policy.failureThreshold, CircuitOpenFor: policy.openFor.String(),
+			CircuitEnabled:   policy.enabled, CircuitFailureThreshold: policy.failureThreshold, CircuitOpenFor: policy.openFor.String(),
 		})
 	}
 	return ConfigSnapshot{
