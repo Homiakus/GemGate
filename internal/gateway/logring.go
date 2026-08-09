@@ -51,6 +51,28 @@ func (r *LogRing) Add(e LogEntry) {
 	r.entries = append(r.entries, e)
 }
 
+func (r *LogRing) Resize(limit int) {
+	if limit <= 0 {
+		limit = 300
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit == r.limit {
+		return
+	}
+	if len(r.entries) > limit {
+		start := len(r.entries) - limit
+		trimmed := make([]LogEntry, limit)
+		copy(trimmed, r.entries[start:])
+		r.entries = trimmed
+	} else {
+		resized := make([]LogEntry, len(r.entries), limit)
+		copy(resized, r.entries)
+		r.entries = resized
+	}
+	r.limit = limit
+}
+
 func (r *LogRing) Snapshot() []LogEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
