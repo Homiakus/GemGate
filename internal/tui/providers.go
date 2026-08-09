@@ -72,14 +72,19 @@ func providerCircuitsByName(items []gateway.CircuitSnapshot) map[string]gateway.
 	return out
 }
 
-func providerAttentionCount(items []gateway.ProviderMetricsSnapshot) int {
-	count := 0
-	for _, p := range items {
+func providerAttentionCount(metrics []gateway.ProviderMetricsSnapshot, circuits []gateway.CircuitSnapshot) int {
+	attention := make(map[string]struct{})
+	for _, p := range metrics {
 		if p.Health == "warning" || p.Health == "degraded" {
-			count++
+			attention[p.Name] = struct{}{}
 		}
 	}
-	return count
+	for _, c := range circuits {
+		if c.State == "open" || c.State == "half_open" {
+			attention[c.Provider] = struct{}{}
+		}
+	}
+	return len(attention)
 }
 
 func providerHealthSummary(items []gateway.ProviderMetricsSnapshot) string {
