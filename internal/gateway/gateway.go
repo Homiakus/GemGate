@@ -12,8 +12,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gemgate/internal/config"
@@ -45,15 +47,15 @@ var upstreamCredentialHeaders = map[string]struct{}{
 var errBodyTooLarge = errors.New("request body too large")
 
 type Gateway struct {
-	cfg             config.Runtime
-	providers       map[string]*providerRuntime
-	defaultProvider *providerRuntime
-	metrics         *Metrics
-	logs            *LogRing
-	tokens          map[string]clientAuth // token -> client settings
-	limits          map[string]*rateWindow
-	server          *http.Server
-	started         time.Time
+	runtimeMu sync.RWMutex
+	reloadMu  sync.Mutex
+	runtime   runtimeSnapshot
+
+	transport *http.Transport
+	metrics   *Metrics
+	logs      *LogRing
+	server    *http.Server
+	started   time.Time
 }
 
 type providerRuntime struct {
@@ -116,59 +118,20 @@ func New(rt config.Runtime) (*Gateway, error) {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.ResponseHeaderTimeout = 0 // model generation may take a long time before first byte
 
-	metrics := NewMetrics()
-	providers := make(map[string]*providerRuntime, len(rt.Config.Providers))
-	for _, p := range rt.Config.Providers {
-		spec, ok := provider.Lookup(p.Type)
-		if !ok {
-			return nil, fmt.Errorf("provider %q has unsupported type %q", p.Name, p.Type)
-		}
-		u, err := url.Parse(strings.TrimRight(p.BaseURL, "/"))
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return nil, fmt.Errorf("provider %q has invalid base_url", p.Name)
-		}
-		headers := make(map[string]string, len(p.Headers))
-		for k, v := range p.Headers {
-			headers[k] = v
-		}
-		metrics.provider(p.Name) // expose configured providers even before first traffic
-		providers[p.Name] = &providerRuntime{
-			name: p.Name, spec: spec, baseURL: u, apiKey: p.APIKey, headers: headers,
-			client: &http.Client{
-				Timeout:   rt.ProviderTimeouts[p.Name],
-				Transport: newProviderMetricsTransport(p.Name, transport, metrics),
-			},
-		}
-	}
-	defaultProvider := providers[rt.Config.DefaultProvider]
-	if defaultProvider == nil {
-		return nil, fmt.Errorf("default provider %q is not configured", rt.Config.DefaultProvider)
-	}
-
-	tokens := make(map[string]clientAuth)
-	limits := make(map[string]*rateWindow)
-	for _, c := range rt.Config.Clients {
-		if c.Enabled {
-			tokens[c.Token] = clientAuth{Name: c.Name, RateLimitRPM: c.RateLimitRPM}
-			if c.RateLimitRPM > 0 {
-				limits[c.Token] = &rateWindow{}
-			}
-		}
-	}
-
 	gw := &Gateway{
-		cfg:             rt,
-		providers:       providers,
-		defaultProvider: defaultProvider,
-		metrics:         metrics,
-		logs:            NewLogRing(rt.Config.Logging.Recent),
-		tokens:          tokens,
-		limits:          limits,
-		started:         time.Now(),
+		transport: transport,
+		metrics:   NewMetrics(),
+		logs:      NewLogRing(rt.Config.Logging.Recent),
+		started:   time.Now(),
 	}
+	state, err := buildRuntimeSnapshot(gw, rt, nil)
+	if err != nil {
+		return nil, err
+	}
+	gw.runtime = state
 	gw.server = &http.Server{
 		Addr:              rt.Config.Server.Listen,
-		Handler:           newCORSHandler(gw, rt.Config.Server.CORS, rt.CORSMaxAge),
+		Handler:           gw,
 		ReadTimeout:       rt.ReadTimeout,
 		ReadHeaderTimeout: minDuration(10*time.Second, rt.ReadTimeout, 10*time.Second),
 		WriteTimeout:      rt.WriteTimeout,
@@ -178,8 +141,15 @@ func New(rt config.Runtime) (*Gateway, error) {
 	return gw, nil
 }
 
+func (g *Gateway) currentRuntime() runtimeSnapshot {
+	g.runtimeMu.RLock()
+	state := g.runtime
+	g.runtimeMu.RUnlock()
+	return state
+}
+
 func (g *Gateway) ListenAndServe() error {
-	g.logs.Add(LogEntry{Level: "info", Message: "listening on " + g.cfg.Config.Server.Listen, Client: "system"})
+	g.logs.Add(LogEntry{Level: "info", Message: "listening on " + g.server.Addr, Client: "system"})
 	if err := g.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -191,17 +161,18 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	return g.server.Shutdown(ctx)
 }
 
-func (g *Gateway) Addr() string             { return g.cfg.Config.Server.Listen }
+func (g *Gateway) Addr() string             { return g.server.Addr }
 func (g *Gateway) Metrics() MetricsSnapshot { return g.metrics.Snapshot() }
 func (g *Gateway) Logs() []LogEntry         { return g.logs.Snapshot() }
 
 func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
-	clients := make([]ClientSnapshot, 0, len(g.cfg.Config.Clients))
-	for _, c := range g.cfg.Config.Clients {
+	state := g.currentRuntime()
+	clients := make([]ClientSnapshot, 0, len(state.cfg.Config.Clients))
+	for _, c := range state.cfg.Config.Clients {
 		clients = append(clients, ClientSnapshot{Name: c.Name, Enabled: c.Enabled, Token: redact(c.Token), RateLimitRPM: c.RateLimitRPM})
 	}
-	providers := make([]ProviderSnapshot, 0, len(g.cfg.Config.Providers))
-	for _, p := range g.cfg.Config.Providers {
+	providers := make([]ProviderSnapshot, 0, len(state.cfg.Config.Providers))
+	for _, p := range state.cfg.Config.Providers {
 		spec, _ := provider.Lookup(p.Type)
 		providers = append(providers, ProviderSnapshot{
 			Name: p.Name, Type: p.Type, BaseURL: p.BaseURL, APIKey: redact(p.APIKey), Timeout: p.Timeout,
@@ -209,27 +180,35 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		})
 	}
 	return ConfigSnapshot{
-		Listen: g.cfg.Config.Server.Listen, PublicHealth: g.cfg.Config.Server.PublicHealth,
-		RequestBodyLimit: g.cfg.Config.Server.RequestBodyLimit,
-		UpstreamBaseURL:  g.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(g.defaultProvider.apiKey),
-		DefaultProvider: g.cfg.Config.DefaultProvider, Providers: providers,
-		LogRecent: g.cfg.Config.Logging.Recent, Clients: clients,
-		CORSEnabled: g.cfg.Config.Server.CORS.IsEnabled(),
-		CORSOrigins: append([]string(nil), g.cfg.Config.Server.CORS.AllowedOrigins...),
+		Listen: state.cfg.Config.Server.Listen, PublicHealth: state.cfg.Config.Server.PublicHealth,
+		RequestBodyLimit: state.cfg.Config.Server.RequestBodyLimit,
+		UpstreamBaseURL:  state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
+		DefaultProvider: state.cfg.Config.DefaultProvider, Providers: providers,
+		LogRecent: state.cfg.Config.Logging.Recent, Clients: clients,
+		CORSEnabled: state.cfg.Config.Server.CORS.IsEnabled(),
+		CORSOrigins: append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
 	}
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	state := g.currentRuntime()
+	if state.cors != nil && state.cors.handle(w, r) {
+		return
+	}
+	g.serveHTTP(state, w, r)
+}
+
+func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	reqID := requestID(r)
 	w.Header().Set("X-Request-ID", reqID)
 
-	if r.URL.Path == "/_healthz" && g.cfg.Config.Server.PublicHealth {
+	if r.URL.Path == "/_healthz" && state.cfg.Config.Server.PublicHealth {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"service":   "gemgate",
 			"uptime":    time.Since(g.started).String(),
-			"providers": providerHealthSnapshot(g.Metrics().Providers),
+			"providers": providerHealthSnapshot(activeProviderMetrics(g.Metrics().Providers, state.providers)),
 		})
 		return
 	}
@@ -238,7 +217,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth, token, ok := g.authenticate(r)
+	auth, token, ok := authenticate(state, r)
 	if !ok {
 		g.metrics.AuthFailures.Add(1)
 		recordStatus(g.metrics, http.StatusUnauthorized)
@@ -253,14 +232,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/_config" {
-		writeJSON(w, http.StatusOK, g.safeConfig())
+		writeJSON(w, http.StatusOK, safeConfig(state))
 		return
 	}
 
-	if !g.allowClient(token, auth.RateLimitRPM) {
+	if !allowClient(state, token, auth.RateLimitRPM) {
 		g.metrics.RateLimited.Add(1)
 		recordStatus(g.metrics, http.StatusTooManyRequests)
-		reset := g.rateLimitReset(token)
+		reset := rateLimitReset(state, token)
 		if reset > 0 {
 			retryAfter := max(1, int(reset.Round(time.Second).Seconds()))
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
@@ -273,7 +252,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.metrics.InFlight.Add(1)
 	defer g.metrics.InFlight.Add(-1)
 
-	result, err := g.proxy(w, r, auth.Name, reqID)
+	result, err := g.proxy(state, w, r, auth.Name, reqID)
 	if err != nil {
 		g.metrics.UpstreamErrors.Add(1)
 		if result.status == 0 {
@@ -295,14 +274,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, clientName, reqID string) (proxyResult, error) {
-	p, targetPath, status, err := g.resolveProvider(r.URL.Path)
+func (g *Gateway) proxy(state runtimeSnapshot, w http.ResponseWriter, r *http.Request, clientName, reqID string) (proxyResult, error) {
+	p, targetPath, status, err := resolveProvider(state, r.URL.Path)
 	if err != nil {
 		return proxyResult{status: status}, err
 	}
 	result := proxyResult{provider: p.name}
 
-	body, contentLength, err := g.prepareBody(r)
+	body, contentLength, err := prepareBody(state, r)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			result.status = http.StatusRequestEntityTooLarge
@@ -357,10 +336,10 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, clientName, reqI
 	return result, nil
 }
 
-func (g *Gateway) resolveProvider(path string) (*providerRuntime, string, int, error) {
+func resolveProvider(state runtimeSnapshot, path string) (*providerRuntime, string, int, error) {
 	const prefix = "/providers/"
 	if !strings.HasPrefix(path, prefix) {
-		return g.defaultProvider, path, 0, nil
+		return state.defaultProvider, path, 0, nil
 	}
 	rest := strings.TrimPrefix(path, prefix)
 	idx := strings.IndexByte(rest, '/')
@@ -368,18 +347,18 @@ func (g *Gateway) resolveProvider(path string) (*providerRuntime, string, int, e
 		return nil, "", http.StatusBadRequest, errors.New("provider route must be /providers/{name}/{path}")
 	}
 	name := rest[:idx]
-	p := g.providers[name]
+	p := state.providers[name]
 	if p == nil {
 		return nil, "", http.StatusNotFound, fmt.Errorf("unknown provider %q", name)
 	}
 	return p, "/" + rest[idx+1:], 0, nil
 }
 
-func (g *Gateway) prepareBody(r *http.Request) (io.Reader, int64, error) {
+func prepareBody(state runtimeSnapshot, r *http.Request) (io.Reader, int64, error) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil, 0, nil
 	}
-	limit := g.cfg.RequestBodyLimit
+	limit := state.cfg.RequestBodyLimit
 	if limit <= 0 {
 		return r.Body, r.ContentLength, nil
 	}
@@ -396,7 +375,7 @@ func (g *Gateway) prepareBody(r *http.Request) (io.Reader, int64, error) {
 	return bytes.NewReader(b), int64(len(b)), nil
 }
 
-func (g *Gateway) authenticate(r *http.Request) (clientAuth, string, bool) {
+func authenticate(state runtimeSnapshot, r *http.Request) (clientAuth, string, bool) {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	parts := strings.SplitN(auth, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
@@ -406,12 +385,12 @@ func (g *Gateway) authenticate(r *http.Request) (clientAuth, string, bool) {
 	if token == "" {
 		return clientAuth{}, "", false
 	}
-	info, ok := g.tokens[token]
+	info, ok := state.tokens[token]
 	return info, token, ok
 }
 
-func (g *Gateway) allowClient(token string, limit int) bool {
-	window := g.limits[token]
+func allowClient(state runtimeSnapshot, token string, limit int) bool {
+	window := state.limits[token]
 	if window == nil {
 		return true
 	}
@@ -419,58 +398,47 @@ func (g *Gateway) allowClient(token string, limit int) bool {
 	return ok
 }
 
-func (g *Gateway) rateLimitReset(token string) time.Duration {
-	window := g.limits[token]
+func rateLimitReset(state runtimeSnapshot, token string) time.Duration {
+	window := state.limits[token]
 	if window == nil {
 		return 0
 	}
-	window.mu.Lock()
-	defer window.mu.Unlock()
-	if window.start.IsZero() {
-		return 0
-	}
-	reset := time.Minute - time.Since(window.start)
-	if reset < 0 {
-		return 0
-	}
-	return reset
+	return window.resetAfter(time.Now())
 }
 
-func (g *Gateway) safeConfig() map[string]any {
-	clients := make([]map[string]any, 0, len(g.cfg.Config.Clients))
-	for _, c := range g.cfg.Config.Clients {
+func safeConfig(state runtimeSnapshot) map[string]any {
+	clients := make([]map[string]any, 0, len(state.cfg.Config.Clients))
+	for _, c := range state.cfg.Config.Clients {
 		clients = append(clients, map[string]any{"name": c.Name, "enabled": c.Enabled, "token": redact(c.Token), "rate_limit_rpm": c.RateLimitRPM})
 	}
-	providers := make([]map[string]any, 0, len(g.cfg.Config.Providers))
-	for _, p := range g.cfg.Config.Providers {
+	providers := make([]map[string]any, 0, len(state.cfg.Config.Providers))
+	for _, p := range state.cfg.Config.Providers {
 		providers = append(providers, map[string]any{
 			"name": p.Name, "type": p.Type, "base_url": p.BaseURL, "api_key": redact(p.APIKey), "timeout": p.Timeout,
 		})
 	}
 	return map[string]any{
 		"server": map[string]any{
-			"listen":             g.cfg.Config.Server.Listen,
-			"public_health":      g.cfg.Config.Server.PublicHealth,
-			"request_body_limit": g.cfg.Config.Server.RequestBodyLimit,
+			"listen":             state.cfg.Config.Server.Listen,
+			"public_health":      state.cfg.Config.Server.PublicHealth,
+			"request_body_limit": state.cfg.Config.Server.RequestBodyLimit,
 			"cors": map[string]any{
-				"enabled":           g.cfg.Config.Server.CORS.IsEnabled(),
-				"allowed_origins":   g.cfg.Config.Server.CORS.AllowedOrigins,
-				"allowed_methods":   g.cfg.Config.Server.CORS.AllowedMethods,
-				"allowed_headers":   g.cfg.Config.Server.CORS.AllowedHeaders,
-				"allow_credentials": g.cfg.Config.Server.CORS.AllowCredentials,
-				"max_age":           g.cfg.Config.Server.CORS.MaxAge,
+				"enabled":         state.cfg.Config.Server.CORS.IsEnabled(),
+				"allowed_origins": append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
 			},
 		},
-		"default_provider": g.cfg.Config.DefaultProvider,
+		"default_provider": state.cfg.Config.DefaultProvider,
 		"providers":        providers,
 		"clients":          clients,
 	}
 }
 
-func providerHealthSnapshot(providers []ProviderMetricsSnapshot) map[string]string {
-	out := make(map[string]string, len(providers))
-	for _, p := range providers {
-		out[p.Name] = p.Health
+func activeProviderMetrics(all []ProviderMetricsSnapshot, providers map[string]*providerRuntime) []ProviderMetricsSnapshot {
+	out := make([]ProviderMetricsSnapshot, 0, len(providers))
+	for _, snapshot := range all {
+		if _, ok := providers[snapshot.Name]; ok {
+			out = append(out, snapshot)
+		}
 	}
 	return out
 }
@@ -639,4 +607,141 @@ func minDuration(values ...time.Duration) time.Duration {
 		}
 	}
 	return out
+}
+
+type runtimeSnapshot struct {
+	cfg             config.Runtime
+	providers       map[string]*providerRuntime
+	defaultProvider *providerRuntime
+	tokens          map[string]clientAuth
+	limits          map[string]*rateWindow
+	cors            *corsHandler
+}
+
+type ReloadResult struct {
+	Changed   bool
+	Reloaded  time.Time
+	Providers int
+	Clients   int
+}
+
+func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapshot) (runtimeSnapshot, error) {
+	providers := make(map[string]*providerRuntime, len(rt.Config.Providers))
+	for _, p := range rt.Config.Providers {
+		spec, ok := provider.Lookup(p.Type)
+		if !ok {
+			return runtimeSnapshot{}, fmt.Errorf("provider %q has unsupported type %q", p.Name, p.Type)
+		}
+		u, err := url.Parse(strings.TrimRight(p.BaseURL, "/"))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return runtimeSnapshot{}, fmt.Errorf("provider %q has invalid base_url", p.Name)
+		}
+		headers := make(map[string]string, len(p.Headers))
+		for k, v := range p.Headers {
+			headers[k] = v
+		}
+		g.metrics.provider(p.Name)
+		providers[p.Name] = &providerRuntime{
+			name:    p.Name,
+			spec:    spec,
+			baseURL: u,
+			apiKey:  p.APIKey,
+			headers: headers,
+			client: &http.Client{
+				Timeout:   rt.ProviderTimeouts[p.Name],
+				Transport: newProviderMetricsTransport(p.Name, g.transport, g.metrics),
+			},
+		}
+	}
+	defaultProvider := providers[rt.Config.DefaultProvider]
+	if defaultProvider == nil {
+		return runtimeSnapshot{}, fmt.Errorf("default provider %q is not configured", rt.Config.DefaultProvider)
+	}
+
+	tokens := make(map[string]clientAuth)
+	limits := make(map[string]*rateWindow)
+	for _, c := range rt.Config.Clients {
+		if !c.Enabled {
+			continue
+		}
+		tokens[c.Token] = clientAuth{Name: c.Name, RateLimitRPM: c.RateLimitRPM}
+		if c.RateLimitRPM <= 0 {
+			continue
+		}
+		if previous != nil {
+			if existing := previous.limits[c.Token]; existing != nil {
+				limits[c.Token] = existing
+				continue
+			}
+		}
+		limits[c.Token] = &rateWindow{}
+	}
+
+	return runtimeSnapshot{
+		cfg:             rt,
+		providers:       providers,
+		defaultProvider: defaultProvider,
+		tokens:          tokens,
+		limits:          limits,
+		cors:            newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
+	}, nil
+}
+
+func (g *Gateway) Reload(rt config.Runtime) (ReloadResult, error) {
+	g.reloadMu.Lock()
+	defer g.reloadMu.Unlock()
+
+	old := g.currentRuntime()
+	if reflect.DeepEqual(old.cfg.Config, rt.Config) {
+		return ReloadResult{Changed: false}, nil
+	}
+	if err := validateHotReload(old.cfg, rt); err != nil {
+		g.recordReloadFailure(err)
+		return ReloadResult{}, err
+	}
+
+	next, err := buildRuntimeSnapshot(g, rt, &old)
+	if err != nil {
+		g.recordReloadFailure(err)
+		return ReloadResult{}, err
+	}
+
+	g.runtimeMu.Lock()
+	g.runtime = next
+	g.runtimeMu.Unlock()
+	g.logs.Resize(rt.Config.Logging.Recent)
+
+	now := time.Now()
+	g.logs.Add(LogEntry{
+		Time: now, Level: "info", Client: "system",
+		Message: fmt.Sprintf("config reloaded atomically: %d providers, %d enabled clients", len(next.providers), len(next.tokens)),
+	})
+	return ReloadResult{Changed: true, Reloaded: now, Providers: len(next.providers), Clients: len(next.tokens)}, nil
+}
+
+func (g *Gateway) RecordReloadFailure(err error) {
+	if err == nil {
+		return
+	}
+	g.recordReloadFailure(err)
+}
+
+func (g *Gateway) recordReloadFailure(err error) {
+	g.logs.Add(LogEntry{Level: "error", Client: "system", Message: "config reload rejected: " + err.Error()})
+}
+
+func validateHotReload(old, next config.Runtime) error {
+	if old.Config.Server.Listen != next.Config.Server.Listen {
+		return fmt.Errorf("server.listen change requires restart (%q -> %q)", old.Config.Server.Listen, next.Config.Server.Listen)
+	}
+	if old.ReadTimeout != next.ReadTimeout {
+		return fmt.Errorf("server.read_timeout change requires restart")
+	}
+	if old.WriteTimeout != next.WriteTimeout {
+		return fmt.Errorf("server.write_timeout change requires restart")
+	}
+	if old.IdleTimeout != next.IdleTimeout {
+		return fmt.Errorf("server.idle_timeout change requires restart")
+	}
+	return nil
 }
