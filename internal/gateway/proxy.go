@@ -152,8 +152,14 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 	}
 	providers := make([]map[string]any, 0, len(state.cfg.Config.Providers))
 	for _, p := range state.cfg.Config.Providers {
+		policy := circuitPolicyFor(state.cfg, p.Name)
 		providers = append(providers, map[string]any{
 			"name": p.Name, "type": p.Type, "base_url": p.BaseURL, "api_key": redact(p.APIKey), "timeout": p.Timeout,
+			"circuit_breaker": map[string]any{
+				"enabled":           policy.enabled,
+				"failure_threshold": policy.failureThreshold,
+				"open_for":          policy.openFor.String(),
+			},
 		})
 	}
 	return map[string]any{
