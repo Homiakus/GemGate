@@ -241,7 +241,8 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 	defer g.metrics.InFlight.Add(-1)
 
 	result, err := g.proxy(state, w, r, auth.Name, reqID)
-	if err != nil {
+	clientAborted := err != nil && r.Context().Err() != nil
+	if err != nil && !clientAborted {
 		g.metrics.UpstreamErrors.Add(1)
 		if result.status == 0 {
 			result.status = http.StatusBadGateway
@@ -250,13 +251,22 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 			http.Error(w, publicProxyError(result.status), result.status)
 		}
 	}
-	recordStatus(g.metrics, result.status)
+	if !clientAborted {
+		recordStatus(g.metrics, result.status)
+	}
+
 	message := ""
+	level := levelForStatus(result.status)
 	if err != nil {
 		message = err.Error()
 	}
+	if clientAborted {
+		result.status = 0
+		level = "info"
+		message = "client canceled request"
+	}
 	g.logs.Add(LogEntry{
-		Time: start, Level: levelForStatus(result.status), Client: auth.Name, Provider: result.provider,
+		Time: start, Level: level, Client: auth.Name, Provider: result.provider,
 		Method: r.Method, Path: r.URL.RequestURI(), Status: result.status, Bytes: result.bytesOut,
 		Duration: time.Since(start), RequestID: reqID, Message: message,
 	})
