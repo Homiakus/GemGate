@@ -19,7 +19,7 @@ func (m Model) dashboardView() string {
 	}
 
 	providerNote := fmt.Sprintf("%d configured", len(m.cfg.Providers))
-	if attention := providerAttentionCount(m.metrics.Providers); attention > 0 {
+	if attention := providerAttentionCount(m.metrics.Providers, m.metrics.Circuits); attention > 0 {
 		providerNote = warnStyle.Render(fmt.Sprintf("%d need attention", attention))
 	}
 
