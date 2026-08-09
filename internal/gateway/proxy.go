@@ -158,6 +158,7 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 			},
 		})
 	}
+	redisConfigured := strings.TrimSpace(state.cfg.Config.RateLimit.Redis.URL) != ""
 	return map[string]any{
 		"server": map[string]any{
 			"listen":             state.cfg.Config.Server.Listen,
@@ -171,6 +172,15 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 				"allowed_headers":   append([]string(nil), state.cfg.Config.Server.CORS.AllowedHeaders...),
 				"allow_credentials": state.cfg.Config.Server.CORS.AllowCredentials,
 				"max_age":           state.cfg.Config.Server.CORS.MaxAge,
+			},
+		},
+		"rate_limit": map[string]any{
+			"backend":   state.cfg.Config.RateLimit.Backend,
+			"fail_open": state.cfg.Config.RateLimit.Redis.FailOpen,
+			"redis": map[string]any{
+				"configured": redisConfigured,
+				"key_prefix": state.cfg.Config.RateLimit.Redis.KeyPrefix,
+				"timeout":    state.cfg.Config.RateLimit.Redis.Timeout,
 			},
 		},
 		"default_provider": state.cfg.Config.DefaultProvider,
