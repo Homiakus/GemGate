@@ -172,12 +172,7 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 	w.Header().Set("X-Request-ID", reqID)
 
 	if r.URL.Path == "/_healthz" && state.cfg.Config.Server.PublicHealth {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":        true,
-			"service":   "gemgate",
-			"uptime":    time.Since(g.started).String(),
-			"providers": providerHealthSnapshot(activeProviderMetrics(g.Metrics().Providers, state.providers)),
-		})
+		g.writeHealth(state, w)
 		return
 	}
 	if r.URL.Path == "/_readyz" && state.cfg.Config.Server.PublicHealth {
@@ -198,6 +193,10 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		return
 	}
 
+	if r.URL.Path == "/_healthz" {
+		g.writeHealth(state, w)
+		return
+	}
 	if r.URL.Path == "/_readyz" {
 		g.writeReadiness(state, w)
 		return
