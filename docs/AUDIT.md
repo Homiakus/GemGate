@@ -4,9 +4,9 @@ This document records the architectural audit and hardening work merged directly
 
 ## Summary
 
-GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential isolation, multi-provider routing, atomic hot reload, file-backed secrets, dedicated operations auth, exact rolling limits, optional Redis-distributed quota, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, modular TUI, cross-platform release packaging and provider-shaped integration tests.
+GemGate started as a compact Gemini-specific proxy. It is now a provider-first AI gateway with strict config, credential isolation, multi-provider routing, atomic hot reload, file-backed secrets, dedicated operations auth, exact rolling limits, optional Redis-distributed quota, configurable CORS, trusted-proxy handling, provider observability, circuit breaking, passive readiness, privacy-bounded OpenTelemetry tracing, modular TUI, cross-platform release packaging and provider-shaped integration tests.
 
-The project deliberately remains a reverse proxy. It does not translate provider schemas, hide billable retries, or capture prompts/completions for logging.
+The project deliberately remains a reverse proxy. It does not translate provider schemas, hide billable retries, or capture prompts/completions for logging or tracing.
 
 ## Findings
 
@@ -15,11 +15,12 @@ The project deliberately remains a reverse proxy. It does not translate provider
 | High | Security | Client and provider credentials were coupled to Gemini-specific proxy logic. | Fixed: inbound provider credentials are stripped; selected provider auth is injected server-side. |
 | High | Architecture | One `upstream` was embedded across config/gateway/UI. | Fixed: provider catalog, named routing and backward-compatible legacy normalization. |
 | High | Control plane | Any application client token could read protected metrics/config operational surfaces. | Fixed: optional dedicated operations token separates control-plane endpoints from application proxy credentials while preserving legacy fallback when omitted. |
-| Medium | Config | Unknown YAML fields were silently accepted. | Fixed with strict `KnownFields(true)`. |
+| Medium | Config | Unknown YAML fields were silently accepted. | Fixed with strict `KnownFields(true)` plus strict telemetry subfield validation. |
 | Medium | Secrets | Key/token rotation required restart. | Fixed for provider/client/operations credentials with file-backed secrets and atomic reload. |
 | Medium | Runtime | Live config could have been partially mutated. | Fixed: validate/build complete candidate, then atomic snapshot swap. |
 | Medium | HTTP | Public errors could reveal transport detail or double-write after streaming began. | Fixed: generic client errors plus response-start tracking. |
-| Medium | HTTP | Hop-by-hop/forwarding headers were insufficiently sanitized. | Fixed: dynamic `Connection` filtering and trusted forwarding reconstruction. |
+| Medium | HTTP | Hop-by-hop/forwarding headers were insufficiently sanitized. | Fixed: dynamic `Connection` filtering, trusted forwarding reconstruction and explicit tracing-header boundary. |
+| Medium | Redirect security | Provider HTTP redirects could trigger hidden follow-up requests with server-side credentials. | Fixed: provider clients never auto-follow redirects; `3xx + Location` passes through to the caller. |
 | Medium | Quality | No complete repository CI. | Fixed: module verification, gofmt diagnostics, vet, race/coverage tests, build, Redis service integration and release-packaging smoke. |
 | Medium | TUI | Large Gemini-centric model/UI. | Fixed: focused views including provider/circuit/rate-limit/operations-auth state. |
 | Medium | Rate limit | Fixed window allowed boundary bursts. | Fixed: exact rolling one-minute in-memory window. |
@@ -31,25 +32,36 @@ The project deliberately remains a reverse proxy. It does not translate provider
 | Medium | Resilience | Repeated transport/5xx failures continuously hit a failing provider. | Fixed: configurable closed/open/half-open circuit breaker with no automatic request replay. |
 | Medium | Readiness | Process liveness and provider readiness were coupled. | Fixed: `/_healthz` liveness plus passive `/_readyz` based on default-provider circuit state. |
 | Medium | Cancellation | Downstream cancellation could be misclassified as provider failure. | Fixed and integration-tested; provider timeout remains a provider failure. |
+| Medium | Streaming accounting | Upstream could return `200` and then truncate the body while provider metrics/circuit state recorded success. | Fixed: non-EOF stream read failures are transport/circuit failures unless the downstream caller cancelled. |
 | Medium | Release | No repeatable multi-platform release/provenance path. | Fixed: shared build script, six targets, version injection, checksums, SPDX SBOM and GitHub artifact attestations on version tags. |
 | Low | Logging config | `log_body` / `log_headers` existed but did nothing. | Fixed: legacy false values remain compatible; true is explicitly rejected until a redaction contract exists. |
-| Low | Tracing | No distributed tracing/OpenTelemetry. | Open, optional. |
+| Low | Tracing | No distributed tracing/OpenTelemetry. | Fixed: optional OTLP/HTTP request/provider spans with strict metadata-only privacy boundary and explicit upstream Trace Context propagation. |
 | Low | Redis operations | No Sentinel/cluster/managed-service deployment examples. | Open; runtime uses standard go-redis URL configuration today. |
-| Low | Streaming edges | Core SSE/cancellation/timeout behavior is covered, but malformed/chunk-boundary/connection-teardown cases can be expanded. | Open. |
+| Low | Streaming edges | Large SSE flush, unknown-length body limit and abrupt post-header disconnect are covered; malformed framing/provider-specific teardown cases can still be expanded. | Partially open. |
 
 ## Current runtime boundaries
 
-- `internal/config` — strict parsing, defaults, secret resolution, operations auth, trusted proxies, Redis/circuit validation and legacy migration;
+- `internal/config` — strict parsing, defaults, secret resolution, operations auth, telemetry policy, trusted proxies, Redis/circuit validation and legacy migration;
 - `internal/provider` — provider metadata and authentication contract;
+- `internal/telemetry` — process-scoped OpenTelemetry SDK/OTLP bootstrap;
 - `internal/gateway/runtime.go` — immutable request runtime and atomic reload;
 - `internal/gateway/operations_auth.go` — control-plane authentication boundary;
+- `internal/gateway/tracing.go` — bounded inbound request span metadata;
 - `internal/gateway/proxy.go` — routing/auth/upstream streaming and redacted config view;
 - `internal/gateway/ratelimit*.go` — memory/Redis rolling quota backends;
 - `internal/gateway/circuitbreaker.go` — snapshot-scoped provider resilience;
-- `internal/gateway/provider_metrics_transport.go` — stream-aware provider metrics/circuit enforcement;
+- `internal/gateway/provider_metrics_transport.go` — stream-aware provider metrics, circuit enforcement and provider spans;
 - `internal/gateway/trusted_proxy.go` — client IP trust boundary;
 - `internal/gateway/health.go` / `readiness.go` — local operational endpoints;
 - `internal/tui` — presentation only.
+
+## OpenTelemetry result
+
+OpenTelemetry traces use OTLP/HTTP and are process-scoped/restart-only. Request spans record method, path without query, request ID, auth domain/client name, rate-limit policy, selected provider, status and normalized outcome. Provider spans stay alive through response-body EOF/Close so streaming duration is measured instead of only time-to-headers.
+
+Regression tests verify that query values, request bodies, application tokens, provider keys and arbitrary headers do not appear in span attributes. Incoming tracing headers are stripped at the provider boundary. Upstream propagation is disabled by default; when explicitly enabled only W3C Trace Context is injected. Baggage is never forwarded.
+
+See `docs/OBSERVABILITY.md`.
 
 ## Operations-auth result
 
@@ -83,11 +95,11 @@ go test -race -cover ./...
 go build ./cmd/gemgate
 ```
 
-CI additionally starts Redis and exercises release cross-compilation/version injection.
+CI additionally starts Redis and exercises release cross-compilation/version injection. Tracing regression tests enforce the no-secrets/no-body/no-query span contract and opt-in upstream propagation.
 
 ## Recommended next iteration
 
-1. Add optional OpenTelemetry tracing without request/response body capture.
-2. Expand streaming integration tests for malformed frames, large chunks and abrupt post-header disconnects.
-3. Add Redis HA/Sentinel/managed deployment guidance if multi-replica production use becomes common.
+1. Add Redis HA/Sentinel/managed-service deployment guidance and failure drills for multi-replica production use.
+2. Expand malformed streaming/provider-specific framing and connection-teardown integration tests.
+3. Consider OTLP metrics/exemplars only if they add operational value beyond the existing Prometheus surface.
 4. Consider a separate operations listener only if deployments need network-level control-plane isolation beyond token auth.
