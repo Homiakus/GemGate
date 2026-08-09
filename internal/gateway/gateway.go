@@ -33,6 +33,7 @@ type providerRuntime struct {
 	apiKey  string
 	headers map[string]string
 	client  *http.Client
+	breaker *circuitBreaker
 }
 
 type clientAuth struct {
@@ -48,12 +49,15 @@ type ClientSnapshot struct {
 }
 
 type ProviderSnapshot struct {
-	Name             string
-	Type             string
-	BaseURL          string
-	APIKey           string
-	Timeout          string
-	OpenAICompatible bool
+	Name                    string
+	Type                    string
+	BaseURL                 string
+	APIKey                  string
+	Timeout                 string
+	OpenAICompatible        bool
+	CircuitEnabled          bool
+	CircuitFailureThreshold int
+	CircuitOpenFor          string
 }
 
 type ConfigSnapshot struct {
@@ -129,9 +133,16 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	return g.server.Shutdown(ctx)
 }
 
-func (g *Gateway) Addr() string             { return g.server.Addr }
-func (g *Gateway) Metrics() MetricsSnapshot { return g.metrics.Snapshot() }
-func (g *Gateway) Logs() []LogEntry         { return g.logs.Snapshot() }
+func (g *Gateway) Addr() string { return g.server.Addr }
+
+func (g *Gateway) Metrics() MetricsSnapshot {
+	snapshot := g.metrics.Snapshot()
+	state := g.currentRuntime()
+	snapshot.Circuits = circuitSnapshots(state, time.Now())
+	return snapshot
+}
+
+func (g *Gateway) Logs() []LogEntry { return g.logs.Snapshot() }
 
 func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 	state := g.currentRuntime()
@@ -142,9 +153,11 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 	providers := make([]ProviderSnapshot, 0, len(state.cfg.Config.Providers))
 	for _, p := range state.cfg.Config.Providers {
 		spec, _ := provider.Lookup(p.Type)
+		policy := circuitPolicyFor(state.cfg, p.Name)
 		providers = append(providers, ProviderSnapshot{
 			Name: p.Name, Type: p.Type, BaseURL: p.BaseURL, APIKey: redact(p.APIKey), Timeout: p.Timeout,
 			OpenAICompatible: spec.OpenAICompatible,
+			CircuitEnabled: policy.enabled, CircuitFailureThreshold: policy.failureThreshold, CircuitOpenFor: policy.openFor.String(),
 		})
 	}
 	return ConfigSnapshot{
