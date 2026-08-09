@@ -128,6 +128,54 @@ func TestTraceContextPropagationIsExplicitAndBaggageFree(t *testing.T) {
 	}
 }
 
+func TestObservabilityConfigSurfaceDoesNotExposeEndpointsOrCredentials(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+
+	rt := runtimeForTests([]config.ProviderConfig{{Name: "openai", Type: "openai", BaseURL: upstream.URL, APIKey: "provider-key"}}, "openai")
+	rt.Config.Telemetry = config.TelemetryConfig{
+		Enabled:           true,
+		ServiceName:       "gemgate-production",
+		Endpoint:          "https://collector-secret.internal/v1/traces",
+		SampleRatio:       0.25,
+		Environment:       "production",
+		PropagateUpstream: true,
+	}
+	rt.Config.RateLimit.Redis.URL = "rediss://redis-user:redis-password@redis-secret.internal:6379/0"
+	gw, err := New(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/_config", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	resp := httptest.NewRecorder()
+	gw.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	for _, secret := range []string{
+		"collector-secret.internal",
+		"redis-secret.internal",
+		"redis-user",
+		"redis-password",
+	} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("/_config leaked %q: %s", secret, body)
+		}
+	}
+	for _, expected := range []string{
+		`"endpoint_configured":true`,
+		`"service_name":"gemgate-production"`,
+		`"sample_ratio":0.25`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("/_config missing safe telemetry state %q: %s", expected, body)
+		}
+	}
+}
+
 func installTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
 	t.Helper()
 	oldProvider := otel.GetTracerProvider()
