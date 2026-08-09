@@ -12,15 +12,14 @@ type readinessProvider struct {
 }
 
 func (g *Gateway) writeReadiness(state runtimeSnapshot, w http.ResponseWriter) {
+	metrics := g.metrics.Snapshot()
 	healthByProvider := make(map[string]string, len(state.providers))
-	for _, metric := range activeProviderMetrics(g.Metrics().Providers, state.providers) {
+	for _, metric := range activeProviderMetrics(metrics.Providers, state.providers) {
 		healthByProvider[metric.Name] = metric.Health
 	}
 	circuitByProvider := make(map[string]CircuitSnapshot, len(state.providers))
-	for _, circuit := range g.metrics.CircuitSnapshots() {
-		if _, ok := state.providers[circuit.Provider]; ok {
-			circuitByProvider[circuit.Provider] = circuit
-		}
+	for _, circuit := range circuitSnapshots(state, time.Now()) {
+		circuitByProvider[circuit.Provider] = circuit
 	}
 
 	providers := make(map[string]readinessProvider, len(state.providers))
@@ -38,7 +37,7 @@ func (g *Gateway) writeReadiness(state runtimeSnapshot, w http.ResponseWriter) {
 			entry.RetryAfterMS = circuit.RetryAfter.Round(time.Millisecond).Milliseconds()
 		}
 		providers[name] = entry
-		if name == state.cfg.Config.DefaultProvider && circuit.State != string(circuitClosed) {
+		if name == state.cfg.Config.DefaultProvider && (circuit.State == string(circuitOpen) || circuit.State == string(circuitHalfOpen)) {
 			ready = false
 		}
 	}
