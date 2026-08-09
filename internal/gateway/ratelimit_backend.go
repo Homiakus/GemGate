@@ -22,6 +22,7 @@ type rateLimitBackend interface {
 	Retain(keys map[string]struct{})
 	Close() error
 	Name() string
+	Mode() string
 }
 
 type memoryRateLimitBackend struct {
@@ -60,6 +61,7 @@ func (b *memoryRateLimitBackend) Retain(keys map[string]struct{}) {
 
 func (b *memoryRateLimitBackend) Close() error   { return nil }
 func (b *memoryRateLimitBackend) Name() string   { return "memory" }
+func (b *memoryRateLimitBackend) Mode() string   { return "local" }
 func (b *memoryRateLimitBackend) FailOpen() bool { return false }
 
 type rateLimitManager struct {
@@ -108,6 +110,7 @@ func (m *rateLimitManager) RetainTokens(tokens map[string]clientAuth) {
 
 func (m *rateLimitManager) Close() error   { return m.backend.Close() }
 func (m *rateLimitManager) Name() string   { return m.backend.Name() }
+func (m *rateLimitManager) Mode() string   { return m.backend.Mode() }
 func (m *rateLimitManager) FailOpen() bool { return m.failOpen }
 
 func rateLimitKey(token string) string {
