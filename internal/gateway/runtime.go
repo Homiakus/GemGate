@@ -56,8 +56,14 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 		providers[p.Name] = &providerRuntime{
 			name: p.Name, spec: spec, baseURL: u, apiKey: p.APIKey, headers: headers, breaker: breaker,
 			client: &http.Client{
-				Timeout:   rt.ProviderTimeouts[p.Name],
-				Transport: newProviderMetricsTransport(p.Name, g.transport, g.metrics, breaker),
+				Timeout: rt.ProviderTimeouts[p.Name],
+				Transport: newProviderMetricsTransport(
+					p.Name,
+					g.transport,
+					g.metrics,
+					breaker,
+					rt.Config.Telemetry.Enabled && rt.Config.Telemetry.PropagateUpstream,
+				),
 				CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
@@ -162,6 +168,9 @@ func validateHotReload(old, next config.Runtime) error {
 	}
 	if !reflect.DeepEqual(old.Config.RateLimit, next.Config.RateLimit) {
 		return fmt.Errorf("rate_limit backend settings change requires restart")
+	}
+	if !reflect.DeepEqual(old.Config.Telemetry, next.Config.Telemetry) {
+		return fmt.Errorf("telemetry settings change requires restart")
 	}
 	return nil
 }
