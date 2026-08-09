@@ -20,6 +20,9 @@ import (
 const (
 	DefaultCircuitFailureThreshold = 5
 	DefaultCircuitOpenFor          = 30 * time.Second
+	DefaultRateLimitBackend        = "memory"
+	DefaultRedisRateLimitPrefix    = "gemgate:ratelimit:"
+	DefaultRedisRateLimitTimeout   = 2 * time.Second
 )
 
 type Config struct {
@@ -28,6 +31,7 @@ type Config struct {
 	Providers       []ProviderConfig `yaml:"providers,omitempty"`
 	DefaultProvider string           `yaml:"default_provider,omitempty"`
 	Clients         []ClientConfig   `yaml:"clients"`
+	RateLimit       RateLimitConfig  `yaml:"rate_limit,omitempty"`
 	Logging         LoggingConfig    `yaml:"logging"`
 }
 
@@ -51,9 +55,7 @@ type CORSConfig struct {
 	MaxAge           string   `yaml:"max_age,omitempty"`
 }
 
-func (c CORSConfig) IsEnabled() bool {
-	return c.Enabled == nil || *c.Enabled
-}
+func (c CORSConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
 
 type CircuitBreakerConfig struct {
 	Enabled          *bool  `yaml:"enabled,omitempty"`
@@ -61,14 +63,25 @@ type CircuitBreakerConfig struct {
 	OpenFor          string `yaml:"open_for,omitempty"`
 }
 
-func (c CircuitBreakerConfig) IsEnabled() bool {
-	return c.Enabled == nil || *c.Enabled
-}
+func (c CircuitBreakerConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
 
 type CircuitBreakerRuntime struct {
 	Enabled          bool
 	FailureThreshold int
 	OpenFor          time.Duration
+}
+
+type RateLimitConfig struct {
+	Backend string               `yaml:"backend,omitempty"`
+	Redis   RedisRateLimitConfig `yaml:"redis,omitempty"`
+}
+
+type RedisRateLimitConfig struct {
+	URL       string `yaml:"url,omitempty"`
+	URLFile   string `yaml:"url_file,omitempty"`
+	KeyPrefix string `yaml:"key_prefix,omitempty"`
+	Timeout   string `yaml:"timeout,omitempty"`
+	FailOpen  bool   `yaml:"fail_open,omitempty"`
 }
 
 type UpstreamConfig struct {
@@ -114,6 +127,7 @@ type Runtime struct {
 	TrustedProxies   []netip.Prefix
 	RequestBodyLimit int64
 	CORSMaxAge       time.Duration
+	RateLimitTimeout time.Duration
 }
 
 var (
@@ -126,7 +140,6 @@ func Load(path string) (Runtime, error) {
 	if err != nil {
 		return Runtime{}, fmt.Errorf("read config: %w", err)
 	}
-
 	expanded := envPattern.ReplaceAllStringFunc(string(b), func(match string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(match, "${"), "}")
 		return os.Getenv(name)
@@ -167,6 +180,9 @@ func Load(path string) (Runtime, error) {
 	if rt.TrustedProxies, err = parseTrustedProxies(cfg.Server.TrustedProxies); err != nil {
 		return Runtime{}, fmt.Errorf("server.trusted_proxies: %w", err)
 	}
+	if rt.RateLimitTimeout, err = parseDuration(cfg.RateLimit.Redis.Timeout); err != nil {
+		return Runtime{}, fmt.Errorf("rate_limit.redis.timeout: %w", err)
+	}
 	for _, p := range cfg.Providers {
 		d, parseErr := parseDuration(p.Timeout)
 		if parseErr != nil {
@@ -176,7 +192,6 @@ func Load(path string) (Runtime, error) {
 		if p.Name == cfg.DefaultProvider {
 			rt.UpstreamTimeout = d
 		}
-
 		openFor, parseErr := parseDuration(p.CircuitBreaker.OpenFor)
 		if parseErr != nil {
 			return Runtime{}, fmt.Errorf("provider %q circuit_breaker.open_for: %w", p.Name, parseErr)
@@ -187,7 +202,6 @@ func Load(path string) (Runtime, error) {
 			OpenFor:          openFor,
 		}
 	}
-
 	if err := validate(rt); err != nil {
 		return Runtime{}, err
 	}
@@ -246,6 +260,20 @@ func applyDefaults(cfg *Config) {
 		cfg.Logging.Recent = 300
 	}
 
+	cfg.RateLimit.Backend = strings.ToLower(strings.TrimSpace(cfg.RateLimit.Backend))
+	if cfg.RateLimit.Backend == "" {
+		cfg.RateLimit.Backend = DefaultRateLimitBackend
+	}
+	cfg.RateLimit.Redis.URL = strings.TrimSpace(cfg.RateLimit.Redis.URL)
+	cfg.RateLimit.Redis.URLFile = strings.TrimSpace(cfg.RateLimit.Redis.URLFile)
+	cfg.RateLimit.Redis.KeyPrefix = strings.TrimSpace(cfg.RateLimit.Redis.KeyPrefix)
+	if cfg.RateLimit.Redis.KeyPrefix == "" {
+		cfg.RateLimit.Redis.KeyPrefix = DefaultRedisRateLimitPrefix
+	}
+	if cfg.RateLimit.Redis.Timeout == "" {
+		cfg.RateLimit.Redis.Timeout = DefaultRedisRateLimitTimeout.String()
+	}
+
 	if len(cfg.Providers) == 0 {
 		if cfg.Upstream.BaseURL == "" {
 			cfg.Upstream.BaseURL = "https://generativelanguage.googleapis.com"
@@ -265,7 +293,6 @@ func applyDefaults(cfg *Config) {
 			cfg.DefaultProvider = "gemini"
 		}
 	}
-
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
 		p.Name = strings.TrimSpace(p.Name)
@@ -330,6 +357,17 @@ func resolveSecretFiles(cfg *Config, baseDir string) error {
 		}
 		c.Token = secret
 	}
+	redisCfg := &cfg.RateLimit.Redis
+	if redisCfg.URL != "" && redisCfg.URLFile != "" {
+		return errors.New("rate_limit.redis.url and url_file are mutually exclusive")
+	}
+	if redisCfg.URLFile != "" {
+		secret, err := readSecretFile(baseDir, redisCfg.URLFile)
+		if err != nil {
+			return fmt.Errorf("rate_limit.redis.url_file: %w", err)
+		}
+		redisCfg.URL = secret
+	}
 	return nil
 }
 
@@ -352,9 +390,7 @@ func readSecretFile(baseDir, name string) (string, error) {
 func syncLegacyUpstream(cfg *Config) {
 	for _, p := range cfg.Providers {
 		if p.Name == cfg.DefaultProvider {
-			cfg.Upstream = UpstreamConfig{
-				BaseURL: p.BaseURL, APIKey: p.APIKey, APIKeyFile: p.APIKeyFile, Timeout: p.Timeout,
-			}
+			cfg.Upstream = UpstreamConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, APIKeyFile: p.APIKeyFile, Timeout: p.Timeout}
 			return
 		}
 	}
@@ -365,7 +401,6 @@ func validate(rt Runtime) error {
 	if len(cfg.Providers) == 0 {
 		return errors.New("no providers configured")
 	}
-
 	seenProviders := make(map[string]struct{}, len(cfg.Providers))
 	defaultFound := false
 	for _, p := range cfg.Providers {
@@ -382,7 +417,6 @@ func validate(rt Runtime) error {
 		if p.Name == cfg.DefaultProvider {
 			defaultFound = true
 		}
-
 		spec, ok := provider.Lookup(p.Type)
 		if !ok {
 			return fmt.Errorf("provider %q has unsupported type %q", p.Name, p.Type)
@@ -405,7 +439,6 @@ func validate(rt Runtime) error {
 				return fmt.Errorf("provider %q has empty header name", p.Name)
 			}
 		}
-
 		policy, ok := rt.ProviderCircuits[p.Name]
 		if !ok {
 			policy = CircuitBreakerRuntime{Enabled: true, FailureThreshold: DefaultCircuitFailureThreshold, OpenFor: DefaultCircuitOpenFor}
@@ -452,6 +485,45 @@ func validate(rt Runtime) error {
 	}
 	if err := validateCORS(cfg.Server.CORS, rt.CORSMaxAge); err != nil {
 		return err
+	}
+	if err := validateRateLimit(cfg.RateLimit, rt.RateLimitTimeout); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRateLimit(cfg RateLimitConfig, timeout time.Duration) error {
+	switch cfg.Backend {
+	case "memory":
+		return nil
+	case "redis":
+	default:
+		return fmt.Errorf("rate_limit.backend must be memory or redis, got %q", cfg.Backend)
+	}
+	if strings.TrimSpace(cfg.Redis.URL) == "" {
+		return errors.New("rate_limit.redis.url or url_file is required when backend is redis")
+	}
+	u, err := url.Parse(cfg.Redis.URL)
+	if err != nil || u.Host == "" || (u.Scheme != "redis" && u.Scheme != "rediss") {
+		return errors.New("rate_limit.redis.url must be an absolute redis:// or rediss:// URL")
+	}
+	if u.Fragment != "" {
+		return errors.New("rate_limit.redis.url must not contain a fragment")
+	}
+	if timeout <= 0 {
+		return errors.New("rate_limit.redis.timeout must be positive")
+	}
+	prefix := cfg.Redis.KeyPrefix
+	if strings.TrimSpace(prefix) == "" {
+		return errors.New("rate_limit.redis.key_prefix must not be empty")
+	}
+	if len(prefix) > 128 {
+		return errors.New("rate_limit.redis.key_prefix must not exceed 128 bytes")
+	}
+	for _, r := range prefix {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("rate_limit.redis.key_prefix contains control characters")
+		}
 	}
 	return nil
 }
@@ -564,11 +636,7 @@ func parseBytes(s string) (int64, error) {
 	units := []struct {
 		suffix string
 		mult   int64
-	}{
-		{"KiB", 1024}, {"MiB", 1024 * 1024}, {"GiB", 1024 * 1024 * 1024},
-		{"KB", 1000}, {"MB", 1000 * 1000}, {"GB", 1000 * 1000 * 1000},
-		{"B", 1},
-	}
+	}{{"KiB", 1024}, {"MiB", 1024 * 1024}, {"GiB", 1024 * 1024 * 1024}, {"KB", 1000}, {"MB", 1000 * 1000}, {"GB", 1000 * 1000 * 1000}, {"B", 1}}
 	for _, u := range units {
 		if strings.HasSuffix(s, u.suffix) {
 			numeric := strings.TrimSpace(strings.TrimSuffix(s, u.suffix))

@@ -62,18 +62,20 @@ type ProviderSnapshot struct {
 }
 
 type ConfigSnapshot struct {
-	Listen           string
-	PublicHealth     bool
-	RequestBodyLimit string
-	TrustedProxies   []string
-	UpstreamBaseURL  string // compatibility alias for default provider
-	UpstreamAPIKey   string // compatibility alias for default provider
-	DefaultProvider  string
-	Providers        []ProviderSnapshot
-	LogRecent        int
-	Clients          []ClientSnapshot
-	CORSEnabled      bool
-	CORSOrigins      []string
+	Listen            string
+	PublicHealth      bool
+	RequestBodyLimit  string
+	TrustedProxies    []string
+	RateLimitBackend  string
+	RateLimitFailOpen bool
+	UpstreamBaseURL   string // compatibility alias for default provider
+	UpstreamAPIKey    string // compatibility alias for default provider
+	DefaultProvider   string
+	Providers         []ProviderSnapshot
+	LogRecent         int
+	Clients           []ClientSnapshot
+	CORSEnabled       bool
+	CORSOrigins       []string
 }
 
 type proxyResult struct {
@@ -92,9 +94,13 @@ func New(rt config.Runtime) (*Gateway, error) {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.ResponseHeaderTimeout = 0 // model generation may take a long time before first byte
 
+	rateLimits, err := newRateLimitManager(rt)
+	if err != nil {
+		return nil, err
+	}
 	gw := &Gateway{
 		transport:  transport,
-		rateLimits: newRateLimitManager(),
+		rateLimits: rateLimits,
 		metrics:    NewMetrics(),
 		logs:       NewLogRing(rt.Config.Logging.Recent),
 		started:    time.Now(),
@@ -174,7 +180,8 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		Listen: state.cfg.Config.Server.Listen, PublicHealth: state.cfg.Config.Server.PublicHealth,
 		RequestBodyLimit: state.cfg.Config.Server.RequestBodyLimit,
 		TrustedProxies:   append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
-		UpstreamBaseURL:  state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
+		RateLimitBackend: g.rateLimits.Name(), RateLimitFailOpen: g.rateLimits.FailOpen(),
+		UpstreamBaseURL: state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
 		DefaultProvider: state.cfg.Config.DefaultProvider, Providers: providers,
 		LogRecent: state.cfg.Config.Logging.Recent, Clients: clients,
 		CORSEnabled: state.cfg.Config.Server.CORS.IsEnabled(),
@@ -236,12 +243,16 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		return
 	}
 
-	decision, err := g.rateLimits.Allow(r.Context(), token, auth.RateLimitRPM, time.Now())
-	if err != nil {
-		recordStatus(g.metrics, http.StatusServiceUnavailable)
-		g.logs.Add(LogEntry{Time: start, Level: "error", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusServiceUnavailable, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable: " + err.Error()})
-		http.Error(w, "rate limit backend unavailable", http.StatusServiceUnavailable)
-		return
+	decision, limitErr := g.rateLimits.Allow(r.Context(), token, auth.RateLimitRPM, time.Now())
+	if limitErr != nil {
+		g.metrics.RateLimitBackendErrors.Add(1)
+		if !decision.Allowed {
+			recordStatus(g.metrics, http.StatusServiceUnavailable)
+			g.logs.Add(LogEntry{Time: start, Level: "error", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusServiceUnavailable, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable: " + limitErr.Error()})
+			http.Error(w, "rate limit backend unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable; fail-open allowed request: " + limitErr.Error()})
 	}
 	if !decision.Allowed {
 		g.metrics.RateLimited.Add(1)

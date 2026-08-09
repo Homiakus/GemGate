@@ -155,5 +155,8 @@ func validateHotReload(old, next config.Runtime) error {
 	if old.IdleTimeout != next.IdleTimeout {
 		return fmt.Errorf("server.idle_timeout change requires restart")
 	}
+	if !reflect.DeepEqual(old.Config.RateLimit, next.Config.RateLimit) {
+		return fmt.Errorf("rate_limit backend settings change requires restart")
+	}
 	return nil
 }

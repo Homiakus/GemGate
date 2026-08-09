@@ -159,6 +159,81 @@ clients:
 	}
 }
 
+func TestRateLimitDefaultsToMemory(t *testing.T) {
+	path := writeConfig(t, `
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`)
+	rt, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Config.RateLimit.Backend != "memory" {
+		t.Fatalf("rate limit backend = %q", rt.Config.RateLimit.Backend)
+	}
+	if rt.Config.RateLimit.Redis.KeyPrefix != DefaultRedisRateLimitPrefix {
+		t.Fatalf("redis key prefix = %q", rt.Config.RateLimit.Redis.KeyPrefix)
+	}
+}
+
+func TestRedisRateLimitURLFile(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "redis-url")
+	if err := os.WriteFile(secretPath, []byte("redis://127.0.0.1:6379/2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	body := `
+rate_limit:
+  backend: redis
+  redis:
+    url_file: redis-url
+    key_prefix: test:
+    timeout: 750ms
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`
+	if err := os.WriteFile(configPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Config.RateLimit.Redis.URL != "redis://127.0.0.1:6379/2" {
+		t.Fatalf("redis URL = %q", rt.Config.RateLimit.Redis.URL)
+	}
+	if rt.RateLimitTimeout.String() != "750ms" {
+		t.Fatalf("redis timeout = %s", rt.RateLimitTimeout)
+	}
+}
+
+func TestRedisRateLimitRejectsInvalidURL(t *testing.T) {
+	path := writeConfig(t, `
+rate_limit:
+  backend: redis
+  redis:
+    url: https://example.com
+upstream:
+  api_key: secret
+clients:
+  - name: local
+    token: token
+    enabled: true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid redis URL to fail")
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
