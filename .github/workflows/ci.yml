@@ -23,11 +23,14 @@ jobs:
     env:
       GEMGATE_TEST_REDIS_URL: redis://127.0.0.1:6379/0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
       - name: Verify modules
         run: go mod verify
       - name: Verify formatting
@@ -45,3 +48,17 @@ jobs:
         run: go test -race -cover ./...
       - name: Build
         run: go build ./cmd/gemgate
+      - name: Release packaging smoke test
+        shell: bash
+        env:
+          VERSION: ci
+          SOURCE_DATE_EPOCH: "946684800"
+        run: |
+          ./scripts/build-release.sh
+          mkdir -p /tmp/gemgate-release-smoke
+          tar -xzf dist/gemgate_ci_linux_amd64.tar.gz -C /tmp/gemgate-release-smoke
+          actual="$(/tmp/gemgate-release-smoke/gemgate version)"
+          test "$actual" = "gemgate ci" || {
+            echo "unexpected injected version: $actual" >&2
+            exit 1
+          }

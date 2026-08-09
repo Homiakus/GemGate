@@ -19,7 +19,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const version = "0.4.0"
+// version is overridden for tagged builds with -ldflags "-X main.version=<version>".
+var version = "0.4.0-dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -201,9 +202,9 @@ Usage:
   gemgate version
 
 Hot reload:
-  Config, provider keys, client tokens, CORS, providers and request limits are
-  validated and swapped atomically. Listener/read/write/idle timeout changes
-  require restart. Set -reload-interval 0 to disable polling.
+  Provider/client/CORS/trusted-proxy policy is validated and swapped atomically.
+  Listener timeouts and rate-limit backend/Redis connection settings require restart.
+  Set -reload-interval 0 to disable polling.
 
 Routing:
   /providers/<name>/<path>  -> named provider, prefix stripped
