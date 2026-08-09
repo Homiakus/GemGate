@@ -62,21 +62,27 @@ type ProviderSnapshot struct {
 }
 
 type ConfigSnapshot struct {
-	Listen                  string
-	PublicHealth            bool
-	RequestBodyLimit        string
-	TrustedProxies          []string
-	DedicatedOperationsAuth bool
-	RateLimitBackend        string
-	RateLimitFailOpen       bool
-	UpstreamBaseURL         string // compatibility alias for default provider
-	UpstreamAPIKey          string // compatibility alias for default provider
-	DefaultProvider         string
-	Providers               []ProviderSnapshot
-	LogRecent               int
-	Clients                 []ClientSnapshot
-	CORSEnabled             bool
-	CORSOrigins             []string
+	Listen                      string
+	PublicHealth                bool
+	RequestBodyLimit            string
+	TrustedProxies              []string
+	DedicatedOperationsAuth     bool
+	RateLimitBackend            string
+	RateLimitFailOpen           bool
+	TelemetryEnabled            bool
+	TelemetryServiceName        string
+	TelemetrySampleRatio        float64
+	TelemetryEnvironment        string
+	TelemetryPropagateUpstream  bool
+	TelemetryEndpointConfigured bool
+	UpstreamBaseURL             string // compatibility alias for default provider
+	UpstreamAPIKey              string // compatibility alias for default provider
+	DefaultProvider             string
+	Providers                   []ProviderSnapshot
+	LogRecent                   int
+	Clients                     []ClientSnapshot
+	CORSEnabled                 bool
+	CORSOrigins                 []string
 }
 
 type proxyResult struct {
@@ -177,22 +183,29 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 			CircuitEnabled:   policy.enabled, CircuitFailureThreshold: policy.failureThreshold, CircuitOpenFor: policy.openFor.String(),
 		})
 	}
+	telemetry := state.cfg.Config.Telemetry
 	return ConfigSnapshot{
-		Listen:                  state.cfg.Config.Server.Listen,
-		PublicHealth:            state.cfg.Config.Server.PublicHealth,
-		RequestBodyLimit:        state.cfg.Config.Server.RequestBodyLimit,
-		TrustedProxies:          append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
-		DedicatedOperationsAuth: state.operationsToken != "",
-		RateLimitBackend:        g.rateLimits.Name(),
-		RateLimitFailOpen:       g.rateLimits.FailOpen(),
-		UpstreamBaseURL:         state.defaultProvider.baseURL.String(),
-		UpstreamAPIKey:          redact(state.defaultProvider.apiKey),
-		DefaultProvider:         state.cfg.Config.DefaultProvider,
-		Providers:               providers,
-		LogRecent:               state.cfg.Config.Logging.Recent,
-		Clients:                 clients,
-		CORSEnabled:             state.cfg.Config.Server.CORS.IsEnabled(),
-		CORSOrigins:             append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
+		Listen:                      state.cfg.Config.Server.Listen,
+		PublicHealth:                state.cfg.Config.Server.PublicHealth,
+		RequestBodyLimit:            state.cfg.Config.Server.RequestBodyLimit,
+		TrustedProxies:              append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
+		DedicatedOperationsAuth:     state.operationsToken != "",
+		RateLimitBackend:            g.rateLimits.Name(),
+		RateLimitFailOpen:           g.rateLimits.FailOpen(),
+		TelemetryEnabled:            telemetry.Enabled,
+		TelemetryServiceName:        telemetry.ServiceName,
+		TelemetrySampleRatio:        telemetry.SampleRatio,
+		TelemetryEnvironment:        telemetry.Environment,
+		TelemetryPropagateUpstream:  telemetry.PropagateUpstream,
+		TelemetryEndpointConfigured: strings.TrimSpace(telemetry.Endpoint) != "",
+		UpstreamBaseURL:             state.defaultProvider.baseURL.String(),
+		UpstreamAPIKey:              redact(state.defaultProvider.apiKey),
+		DefaultProvider:             state.cfg.Config.DefaultProvider,
+		Providers:                   providers,
+		LogRecent:                   state.cfg.Config.Logging.Recent,
+		Clients:                     clients,
+		CORSEnabled:                 state.cfg.Config.Server.CORS.IsEnabled(),
+		CORSOrigins:                 append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
 	}
 }
 
