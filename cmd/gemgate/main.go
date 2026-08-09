@@ -13,12 +13,13 @@ import (
 
 	"gemgate/internal/config"
 	"gemgate/internal/gateway"
+	"gemgate/internal/provider"
 	"gemgate/internal/tui"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -27,7 +28,6 @@ func main() {
 		cmd = os.Args[1]
 	}
 
-	// остаток аргументов после команды (безопасно, даже если их нет)
 	var rest []string
 	if len(os.Args) > 2 {
 		rest = os.Args[2:]
@@ -38,6 +38,8 @@ func main() {
 		must(run(true, rest))
 	case "serve":
 		must(run(false, rest))
+	case "providers":
+		printProviders()
 	case "version", "--version", "-v":
 		fmt.Println("gemgate", version)
 	case "help", "--help", "-h":
@@ -56,10 +58,9 @@ func run(withTUI bool, args []string) error {
 		return err
 	}
 
-	// Если файл конфига не найден — запускаем мастер первоначальной настройки
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		if err2 := runSetupWizard(*configPath); err2 != nil {
-			return err2
+		if err := runSetupWizard(*configPath); err != nil {
+			return err
 		}
 	}
 
@@ -73,9 +74,7 @@ func run(withTUI bool, args []string) error {
 	}
 
 	serverErr := make(chan error, 1)
-	go func() {
-		serverErr <- gw.ListenAndServe()
-	}()
+	go func() { serverErr <- gw.ListenAndServe() }()
 
 	if withTUI {
 		p := tea.NewProgram(tui.New(gw))
@@ -86,7 +85,7 @@ func run(withTUI bool, args []string) error {
 		return shutdown(gw)
 	}
 
-	printConnectionInfo(gw.Addr(), "")
+	printRuntimeInfo(gw.ConfigSnapshot())
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	select {
@@ -97,10 +96,8 @@ func run(withTUI bool, args []string) error {
 	}
 }
 
-// runSetupWizard запускает интерактивный TUI-мастер настройки и сохраняет config.yaml.
 func runSetupWizard(configPath string) error {
-	fmt.Printf("Config file %q not found. Starting first-time setup...\n", configPath)
-
+	fmt.Printf("Config file %q not found. Starting first-time Gemini setup...\n", configPath)
 	result, err := tui.RunSetup(configPath)
 	if err != nil {
 		return fmt.Errorf("setup wizard error: %w", err)
@@ -108,22 +105,39 @@ func runSetupWizard(configPath string) error {
 	if result.Cancelled {
 		return fmt.Errorf("setup cancelled; create %s manually and re-run", configPath)
 	}
-
 	if err := tui.WriteConfig(result); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	fmt.Printf("Config saved to %s\n", configPath)
-	printConnectionInfo(result.Listen, result.GemgateToken)
+	baseURL := tui.LocalBaseURL(result.Listen)
+	fmt.Printf("GemGate URL: %s\n", baseURL)
+	fmt.Printf("Default Gemini OpenAI-compatible URL: %s/v1beta/openai/\n", baseURL)
+	fmt.Printf("Access token: Bearer %s\n", result.GemgateToken)
+	fmt.Println("Add more providers in config.yaml under providers:; see `gemgate providers`.")
 	return nil
 }
 
-func printConnectionInfo(listen, token string) {
-	baseURL := tui.LocalBaseURL(listen)
-	fmt.Printf("gemgate listening on %s\n", listen)
-	fmt.Printf("Connect URL: %s/v1beta/openai/\n", baseURL)
-	fmt.Printf("Native Gemini URL: %s/v1beta/models/gemini-3.5-flash:generateContent\n", baseURL)
-	if token != "" {
-		fmt.Printf("Access token: Bearer %s\n", token)
+func printRuntimeInfo(cfg gateway.ConfigSnapshot) {
+	baseURL := tui.LocalBaseURL(cfg.Listen)
+	fmt.Printf("GemGate listening on %s\n", cfg.Listen)
+	fmt.Printf("Default provider: %s (root requests proxy there)\n", cfg.DefaultProvider)
+	for _, p := range cfg.Providers {
+		fmt.Printf("Provider %-12s type=%-18s route=%s/providers/%s/\n", p.Name, p.Type, baseURL, p.Name)
+	}
+}
+
+func printProviders() {
+	fmt.Println("Supported provider types:")
+	for _, spec := range provider.Supported() {
+		base := spec.DefaultBaseURL
+		if base == "" {
+			base = "<configure base_url>"
+		}
+		compat := ""
+		if spec.OpenAICompatible {
+			compat = " [OpenAI-compatible]"
+		}
+		fmt.Printf("  %-18s %-20s %s%s\n", spec.Type, spec.DisplayName, base, compat)
 	}
 }
 
@@ -134,29 +148,33 @@ func shutdown(gw *gateway.Gateway) error {
 }
 
 func usage() {
-	fmt.Print(`GemGate — Go Gemini API gateway with Charm TUI
+	fmt.Print(`GemGate — multi-provider AI API gateway with Charm TUI
 
 Usage:
-  gemgate run   -config config.yaml   # server + TUI
-  gemgate tui   -config config.yaml   # alias for run
-  gemgate serve -config config.yaml   # headless server
+  gemgate run       -config config.yaml   # server + TUI
+  gemgate tui       -config config.yaml   # alias for run
+  gemgate serve     -config config.yaml   # headless server
+  gemgate providers                       # list built-in provider types
   gemgate version
 
-Environment example:
-  export GEMINI_API_KEY="your-real-gemini-key"
-  export GEMGATE_TOKEN="your-client-facing-token"
+Routing:
+  /providers/<name>/<path>  -> named provider, prefix stripped
+  /<path>                   -> default_provider (backward compatible)
 
-OpenAI-compatible client base URL:
-  http://localhost:8080/v1beta/openai/
+Examples:
+  http://localhost:8080/providers/openai/responses
+  http://localhost:8080/providers/anthropic/v1/messages
+  http://localhost:8080/providers/gemini/v1beta/openai/chat/completions
 
-Native Gemini path example:
-  http://localhost:8080/v1beta/models/gemini-3.5-flash:generateContent
+Clients always authenticate to GemGate with:
+  Authorization: Bearer <GEMGATE_TOKEN>
+
+GemGate removes that credential and injects the selected provider's own auth upstream.
 `)
 }
 
 func must(err error) {
-	if err == nil {
-		return
+	if err != nil {
+		log.Fatal(err)
 	}
-	log.Fatal(err)
 }

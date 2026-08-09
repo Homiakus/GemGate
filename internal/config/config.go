@@ -3,19 +3,25 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"gemgate/internal/provider"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Upstream UpstreamConfig `yaml:"upstream"`
-	Clients  []ClientConfig `yaml:"clients"`
-	Logging  LoggingConfig  `yaml:"logging"`
+	Server          ServerConfig     `yaml:"server"`
+	Upstream        UpstreamConfig   `yaml:"upstream,omitempty"` // legacy single-provider config
+	Providers       []ProviderConfig `yaml:"providers,omitempty"`
+	DefaultProvider string           `yaml:"default_provider,omitempty"`
+	Clients         []ClientConfig   `yaml:"clients"`
+	Logging         LoggingConfig    `yaml:"logging"`
 }
 
 type ServerConfig struct {
@@ -31,6 +37,15 @@ type UpstreamConfig struct {
 	BaseURL string `yaml:"base_url"`
 	APIKey  string `yaml:"api_key"`
 	Timeout string `yaml:"timeout"`
+}
+
+type ProviderConfig struct {
+	Name    string            `yaml:"name"`
+	Type    string            `yaml:"type"`
+	BaseURL string            `yaml:"base_url,omitempty"`
+	APIKey  string            `yaml:"api_key,omitempty"`
+	Timeout string            `yaml:"timeout,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 type ClientConfig struct {
@@ -51,11 +66,15 @@ type Runtime struct {
 	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration
 	IdleTimeout      time.Duration
-	UpstreamTimeout  time.Duration
+	UpstreamTimeout  time.Duration // default provider timeout, kept for compatibility
+	ProviderTimeouts map[string]time.Duration
 	RequestBodyLimit int64
 }
 
-var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var (
+	envPattern          = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	providerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
 
 func Load(path string) (Runtime, error) {
 	b, err := os.ReadFile(path)
@@ -69,12 +88,14 @@ func Load(path string) (Runtime, error) {
 	})
 
 	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(expanded))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return Runtime{}, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&cfg)
 
-	rt := Runtime{Config: cfg}
+	rt := Runtime{Config: cfg, ProviderTimeouts: make(map[string]time.Duration, len(cfg.Providers))}
 	if rt.ReadTimeout, err = parseDuration(cfg.Server.ReadTimeout); err != nil {
 		return Runtime{}, fmt.Errorf("server.read_timeout: %w", err)
 	}
@@ -84,11 +105,18 @@ func Load(path string) (Runtime, error) {
 	if rt.IdleTimeout, err = parseDuration(cfg.Server.IdleTimeout); err != nil {
 		return Runtime{}, fmt.Errorf("server.idle_timeout: %w", err)
 	}
-	if rt.UpstreamTimeout, err = parseDuration(cfg.Upstream.Timeout); err != nil {
-		return Runtime{}, fmt.Errorf("upstream.timeout: %w", err)
-	}
 	if rt.RequestBodyLimit, err = parseBytes(cfg.Server.RequestBodyLimit); err != nil {
 		return Runtime{}, fmt.Errorf("server.request_body_limit: %w", err)
+	}
+	for _, p := range cfg.Providers {
+		d, parseErr := parseDuration(p.Timeout)
+		if parseErr != nil {
+			return Runtime{}, fmt.Errorf("provider %q timeout: %w", p.Name, parseErr)
+		}
+		rt.ProviderTimeouts[p.Name] = d
+		if p.Name == cfg.DefaultProvider {
+			rt.UpstreamTimeout = d
+		}
 	}
 
 	if err := validate(rt); err != nil {
@@ -113,24 +141,109 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.RequestBodyLimit == "" {
 		cfg.Server.RequestBodyLimit = "32MiB"
 	}
-	if cfg.Upstream.BaseURL == "" {
-		cfg.Upstream.BaseURL = "https://generativelanguage.googleapis.com"
-	}
-	if cfg.Upstream.Timeout == "" {
-		cfg.Upstream.Timeout = "0s"
-	}
 	if cfg.Logging.Recent <= 0 {
 		cfg.Logging.Recent = 300
+	}
+
+	if len(cfg.Providers) == 0 {
+		if cfg.Upstream.BaseURL == "" {
+			cfg.Upstream.BaseURL = "https://generativelanguage.googleapis.com"
+		}
+		if cfg.Upstream.Timeout == "" {
+			cfg.Upstream.Timeout = "0s"
+		}
+		cfg.Providers = []ProviderConfig{{
+			Name:    "gemini",
+			Type:    "gemini",
+			BaseURL: cfg.Upstream.BaseURL,
+			APIKey:  cfg.Upstream.APIKey,
+			Timeout: cfg.Upstream.Timeout,
+		}}
+		if cfg.DefaultProvider == "" {
+			cfg.DefaultProvider = "gemini"
+		}
+	}
+
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		p.Name = strings.TrimSpace(p.Name)
+		p.Type = provider.NormalizeType(p.Type)
+		if p.Type == "" {
+			p.Type = "openai-compatible"
+		}
+		if spec, ok := provider.Lookup(p.Type); ok && p.BaseURL == "" {
+			p.BaseURL = spec.DefaultBaseURL
+		}
+		p.BaseURL = strings.TrimRight(strings.TrimSpace(p.BaseURL), "/")
+		if p.Timeout == "" {
+			p.Timeout = "0s"
+		}
+	}
+	if cfg.DefaultProvider == "" && len(cfg.Providers) > 0 {
+		cfg.DefaultProvider = cfg.Providers[0].Name
+	}
+
+	// Keep legacy snapshot fields useful for existing TUI/code paths.
+	for _, p := range cfg.Providers {
+		if p.Name == cfg.DefaultProvider {
+			cfg.Upstream = UpstreamConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, Timeout: p.Timeout}
+			break
+		}
 	}
 }
 
 func validate(rt Runtime) error {
 	cfg := rt.Config
-	if strings.TrimSpace(cfg.Upstream.APIKey) == "" {
-		return errors.New("upstream.api_key is empty; set GEMINI_API_KEY or put a key in config")
+	if len(cfg.Providers) == 0 {
+		return errors.New("no providers configured")
 	}
+
+	seenProviders := make(map[string]struct{}, len(cfg.Providers))
+	defaultFound := false
+	for _, p := range cfg.Providers {
+		if p.Name == "" {
+			return errors.New("provider has empty name")
+		}
+		if !providerNamePattern.MatchString(p.Name) {
+			return fmt.Errorf("provider name %q contains unsupported characters", p.Name)
+		}
+		if _, exists := seenProviders[p.Name]; exists {
+			return fmt.Errorf("duplicate provider name %q", p.Name)
+		}
+		seenProviders[p.Name] = struct{}{}
+		if p.Name == cfg.DefaultProvider {
+			defaultFound = true
+		}
+
+		spec, ok := provider.Lookup(p.Type)
+		if !ok {
+			return fmt.Errorf("provider %q has unsupported type %q", p.Name, p.Type)
+		}
+		if spec.RequiresAPIKey && strings.TrimSpace(p.APIKey) == "" {
+			return fmt.Errorf("provider %q (%s) requires api_key", p.Name, p.Type)
+		}
+		if strings.TrimSpace(p.BaseURL) == "" {
+			return fmt.Errorf("provider %q requires base_url", p.Name)
+		}
+		u, err := url.Parse(p.BaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("provider %q base_url must be an absolute http(s) URL", p.Name)
+		}
+		if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("provider %q base_url must not contain userinfo, query, or fragment", p.Name)
+		}
+		for key := range p.Headers {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("provider %q has empty header name", p.Name)
+			}
+		}
+	}
+	if !defaultFound {
+		return fmt.Errorf("default_provider %q does not match a configured provider", cfg.DefaultProvider)
+	}
+
 	activeClients := 0
-	seen := map[string]struct{}{}
+	seenTokens := map[string]struct{}{}
 	for _, c := range cfg.Clients {
 		if !c.Enabled {
 			continue
@@ -141,13 +254,13 @@ func validate(rt Runtime) error {
 		if strings.TrimSpace(c.Token) == "" {
 			return fmt.Errorf("client %q has empty token", c.Name)
 		}
-		if _, ok := seen[c.Token]; ok {
+		if _, ok := seenTokens[c.Token]; ok {
 			return fmt.Errorf("duplicate client token for %q", c.Name)
 		}
 		if c.RateLimitRPM < 0 {
 			return fmt.Errorf("client %q rate_limit_rpm must not be negative", c.Name)
 		}
-		seen[c.Token] = struct{}{}
+		seenTokens[c.Token] = struct{}{}
 		activeClients++
 	}
 	if activeClients == 0 {
@@ -181,12 +294,26 @@ func parseBytes(s string) (int64, error) {
 	}
 	for _, u := range units {
 		if strings.HasSuffix(s, u.suffix) {
-			var n int64
-			_, err := fmt.Sscanf(strings.TrimSpace(strings.TrimSuffix(s, u.suffix)), "%d", &n)
-			return n * u.mult, err
+			numeric := strings.TrimSpace(strings.TrimSuffix(s, u.suffix))
+			n, err := strconv.ParseInt(numeric, 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			if n < 0 {
+				return 0, errors.New("size must not be negative")
+			}
+			if n > (1<<63-1)/u.mult {
+				return 0, errors.New("size overflows int64")
+			}
+			return n * u.mult, nil
 		}
 	}
-	var n int64
-	_, err := fmt.Sscanf(s, "%d", &n)
-	return n, err
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, errors.New("size must not be negative")
+	}
+	return n, nil
 }

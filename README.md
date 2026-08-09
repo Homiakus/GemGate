@@ -1,7 +1,7 @@
 # GemGate
 
 <p align="center">
-  <strong>GemGate — легкий Go gateway для Gemini API с TUI, токенами клиентов, метриками и rate limits.</strong>
+  <strong>Лёгкий multi-provider AI API gateway на Go: серверные provider keys, клиентские токены, streaming, rate limits, Prometheus и Charm TUI.</strong>
 </p>
 
 <p align="center">
@@ -11,64 +11,66 @@
   <img alt="Prometheus metrics" src="https://img.shields.io/badge/Metrics-Prometheus-E6522C?logo=prometheus&logoColor=white">
 </p>
 
-GemGate прячет реальный `GEMINI_API_KEY` на сервере и выдает приложениям отдельные bearer tokens. Он проксирует Gemini native REST и OpenAI-compatible запросы, стримит ответы, показывает live TUI и отдает Prometheus-метрики.
+GemGate ставится между приложениями и AI-провайдерами. Клиенты знают только собственный GemGate bearer token; реальные API keys OpenAI, Gemini, Anthropic и других сервисов остаются на сервере. Gateway выбирает провайдера по маршруту, удаляет клиентские credential-заголовки, добавляет upstream auth и проксирует тело запроса/ответа без попыток «унифицировать» разные API-схемы.
 
-> GemGate не обходит квоты, rate limits или safety-механизмы Google/Gemini. Ответы `429` и safety/quota ошибки upstream передаются клиенту как есть.
+> GemGate не обходит квоты, биллинг, safety policies или rate limits провайдеров. Upstream HTTP-ответы передаются клиенту как есть.
 
-## Содержание
+## Что изменилось в v0.3
 
-- [Возможности](#возможности)
-- [Скриншоты TUI](#скриншоты-tui)
-- [Быстрый старт](#быстрый-старт)
-- [Конфигурация](#конфигурация)
-- [Запуск](#запуск)
-- [Использование API](#использование-api)
-- [TUI: управление](#tui-управление)
-- [Operational endpoints](#operational-endpoints)
-- [Docker](#docker)
-- [Systemd](#systemd)
-- [Production notes](#production-notes)
-- [Troubleshooting](#troubleshooting)
+- вместо одного жестко заданного Gemini upstream — реестр нескольких провайдеров;
+- маршруты `/providers/{name}/...` с сохранением старого root-route через `default_provider`;
+- встроенные presets: Gemini, OpenAI, Anthropic, Groq, Mistral, OpenRouter, DeepSeek, xAI, Cohere;
+- generic `openai-compatible` и `none` для локальных/нестандартных endpoints;
+- provider-specific auth без утечки клиентского GemGate token upstream;
+- строгий YAML (`KnownFields`) — опечатки в полях теперь не игнорируются молча;
+- `config.example.yaml`, которого раньше не хватало;
+- архитектурная документация, provider guide, security notes и GitHub Actions CI;
+- дополнительные тесты маршрутизации, auth isolation, redaction и backward compatibility.
 
 ## Возможности
 
 | Возможность | Что дает |
 | --- | --- |
-| Серверный Gemini ключ | `GEMINI_API_KEY` не уходит в клиентские приложения. |
-| Клиентские токены | Каждому приложению можно выдать отдельный `Authorization: Bearer ...`. |
-| OpenAI-compatible proxy | SDK с OpenAI-style `base_url` могут ходить через GemGate. |
-| Native Gemini proxy | Поддерживаются обычные `/v1beta/models/...` Gemini REST маршруты. |
-| Streaming passthrough | Ответы стримятся клиенту без ожидания полного upstream body. |
-| TUI dashboard | Live overview, logs, clients, routes, config, hotkeys. |
-| Per-client rate limits | `clients[].rate_limit_rpm` ограничивает потребление по токену. |
-| Prometheus metrics | `/_metrics` защищен клиентским bearer token. |
-| Redacted config | `/_config` показывает runtime config без раскрытия секретов. |
+| Multi-provider routing | Несколько AI upstream в одном процессе. |
+| Серверные provider keys | Реальные API keys не выдаются клиентам. |
+| Клиентские токены | Отдельный `Authorization: Bearer ...` для каждого потребителя GemGate. |
+| Provider auth adapters | Bearer, Gemini native/OpenAI mode, Anthropic `x-api-key`. |
+| OpenAI-compatible providers | OpenAI, Groq, Mistral, OpenRouter, DeepSeek, xAI и custom endpoints. |
+| Native provider APIs | Gemini native, Anthropic Messages, Cohere и любые passthrough paths. |
+| Streaming passthrough | SSE/streaming response пересылается по мере поступления. |
+| Per-client rate limit | `clients[].rate_limit_rpm` защищает квоты и бюджет. |
+| Charm TUI | Overview, logs, clients, routes, config, hotkeys. |
+| Prometheus | `/_metrics` под клиентской авторизацией. |
+| Redacted config | `/_config` показывает runtime-конфиг без полных секретов. |
+| Legacy migration | Старый `upstream:` автоматически становится provider `gemini`. |
 
-## Скриншоты TUI
+## Поддерживаемые provider types
 
-### Overview
+| `type` | Default upstream | Auth |
+| --- | --- | --- |
+| `gemini` | `https://generativelanguage.googleapis.com` | native `x-goog-api-key`, OpenAI path — Bearer |
+| `openai` | `https://api.openai.com/v1` | Bearer |
+| `anthropic` | `https://api.anthropic.com` | `x-api-key` + `anthropic-version` |
+| `groq` | `https://api.groq.com/openai/v1` | Bearer |
+| `mistral` | `https://api.mistral.ai/v1` | Bearer |
+| `openrouter` | `https://openrouter.ai/api/v1` | Bearer |
+| `deepseek` | `https://api.deepseek.com` | Bearer |
+| `xai` | `https://api.x.ai/v1` | Bearer |
+| `cohere` | `https://api.cohere.com/v2` | Bearer |
+| `openai-compatible` | задаётся пользователем | Bearer, если указан `api_key` |
+| `none` | задаётся пользователем | без auth |
 
-Главный экран показывает live-статус, успешность запросов, ошибки, p95 latency, in-flight запросы, rate-limit события, объем трафика и краткий тренд за последние минуты.
+В бинарнике список можно получить командой:
 
-![GemGate TUI overview](docs/assets/tui-overview.png)
+```bash
+gemgate providers
+```
 
-### Logs
-
-Экран логов предназначен для быстрой диагностики: фильтры `all / warn / errors / auth`, таблица запросов, статус, latency, bytes out, path и detail выбранной строки.
-
-![GemGate TUI logs](docs/assets/tui-logs.png)
-
-### Clients и Routes
-
-`Clients` помогает видеть нагрузку по токенам и лимитам. `Routes` показывает расклад по OpenAI-compatible, Gemini native и operational endpoints, а также быстрые URL для SDK и curl.
-
-![GemGate TUI clients](docs/assets/tui-clients-routes.png)
-
-![GemGate TUI routes](docs/assets/tui-routes.png)
+Подробности: [`docs/PROVIDERS.md`](docs/PROVIDERS.md).
 
 ## Быстрый старт
 
-### 1. Подготовьте конфиг
+### 1. Создайте конфиг
 
 ```bash
 cp config.example.yaml config.yaml
@@ -76,36 +78,33 @@ cp config.example.yaml config.yaml
 
 ### 2. Задайте секреты
 
-Bash, macOS или Linux:
-
 ```bash
-export GEMINI_API_KEY="your-real-gemini-api-key"
-export GEMGATE_TOKEN="your-client-facing-token-at-least-32-random-chars"
+export GEMINI_API_KEY="your-provider-key"
+export GEMGATE_TOKEN="a-long-random-client-token"
 ```
 
 PowerShell:
 
 ```powershell
-$env:GEMINI_API_KEY="your-real-gemini-api-key"
-$env:GEMGATE_TOKEN="your-client-facing-token-at-least-32-random-chars"
+$env:GEMINI_API_KEY="your-provider-key"
+$env:GEMGATE_TOKEN="a-long-random-client-token"
 ```
 
-### 3. Установите зависимости и запустите
+### 3. Запустите
 
 ```bash
-go mod tidy
 go run ./cmd/gemgate run -config config.yaml
 ```
 
-После запуска:
+Headless:
 
-- TUI откроется прямо в терминале.
-- Gateway будет слушать адрес из `server.listen`, по умолчанию `:8080`.
-- Клиенты должны ходить с заголовком `Authorization: Bearer <GEMGATE_TOKEN>`.
+```bash
+go run ./cmd/gemgate serve -config config.yaml
+```
 
 ## Конфигурация
 
-Минимальный `config.yaml`:
+Минимальная современная конфигурация:
 
 ```yaml
 server:
@@ -116,13 +115,16 @@ server:
   public_health: true
   request_body_limit: "32MiB"
 
-upstream:
-  base_url: "https://generativelanguage.googleapis.com"
-  api_key: "${GEMINI_API_KEY}"
-  timeout: "0s"
+default_provider: gemini
+
+providers:
+  - name: gemini
+    type: gemini
+    api_key: "${GEMINI_API_KEY}"
+    timeout: "0s"
 
 clients:
-  - name: "local-dev"
+  - name: local-dev
     token: "${GEMGATE_TOKEN}"
     enabled: true
     rate_limit_rpm: 120
@@ -133,195 +135,164 @@ logging:
   log_headers: false
 ```
 
-### Поля конфига
+### Несколько провайдеров
 
-| Поле | Значение |
-| --- | --- |
-| `server.listen` | Адрес HTTP-сервера. Пример: `:8080`, `127.0.0.1:8080`. |
-| `server.write_timeout` | Для long streaming обычно оставляют `0s`. |
-| `server.public_health` | Разрешает публичный `/_healthz` без bearer token. |
-| `server.request_body_limit` | Максимальный размер request body. Пример: `32MiB`. |
-| `upstream.base_url` | Gemini Developer API host. Обычно менять не нужно. |
-| `upstream.api_key` | Реальный Gemini API key. Лучше через `${GEMINI_API_KEY}`. |
-| `upstream.timeout` | Общий timeout upstream-запроса. `0s` значит без общего timeout. |
-| `clients[].name` | Читаемое имя клиента для логов и TUI. |
-| `clients[].token` | Клиентский bearer token. Не используйте Gemini API key. |
-| `clients[].rate_limit_rpm` | Request-per-minute лимит для клиента. `0` значит unlimited. |
-| `logging.recent` | Размер ring buffer для последних request logs в TUI. |
+```yaml
+default_provider: openai
 
-## Запуск
+providers:
+  - name: openai
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
 
-### TUI + server
+  - name: claude
+    type: anthropic
+    api_key: "${ANTHROPIC_API_KEY}"
 
-```bash
-go run ./cmd/gemgate run -config config.yaml
+  - name: fast
+    type: groq
+    api_key: "${GROQ_API_KEY}"
+
+  - name: local
+    type: openai-compatible
+    base_url: "http://127.0.0.1:11434/v1"
 ```
 
-Алиас:
+`base_url` можно переопределять у любого provider preset. `timeout: "0s"` означает отсутствие общего deadline на upstream request — обычно это правильнее для долгой генерации и streaming.
 
-```bash
-go run ./cmd/gemgate tui -config config.yaml
+### Legacy config
+
+Старый вариант продолжает работать:
+
+```yaml
+upstream:
+  base_url: "https://generativelanguage.googleapis.com"
+  api_key: "${GEMINI_API_KEY}"
+  timeout: "0s"
 ```
 
-### Headless server
+Он нормализуется в provider с именем `gemini`. Для новых конфигураций используйте `providers:`.
 
-```bash
-go run ./cmd/gemgate serve -config config.yaml
-```
+## Маршрутизация
 
-### Бинарник
-
-```bash
-go build -o gemgate ./cmd/gemgate
-./gemgate run -config config.yaml
-```
-
-Windows:
-
-```powershell
-go build -o gemgate.exe ./cmd/gemgate
-.\gemgate.exe run -config config.yaml
-```
-
-### Версия
-
-```bash
-go run ./cmd/gemgate version
-```
-
-## Использование API
-
-### OpenAI-compatible SDK base URL
-
-Используйте этот base URL в OpenAI-compatible SDK:
+### Явный provider
 
 ```text
-http://localhost:8080/v1beta/openai/
+/providers/{provider-name}/{provider-path}
 ```
 
-Curl:
+Префикс `/providers/{provider-name}` удаляется перед отправкой upstream.
+
+Примеры:
+
+```text
+POST /providers/openai/responses
+  -> https://api.openai.com/v1/responses
+
+POST /providers/anthropic/v1/messages
+  -> https://api.anthropic.com/v1/messages
+
+POST /providers/gemini/v1beta/openai/chat/completions
+  -> https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+```
+
+### Default provider
+
+Любой путь без `/providers/...` проксируется в `default_provider`. Благодаря этому старые Gemini base URLs остаются рабочими.
+
+## Клиентская авторизация
+
+Все внешние клиенты используют только GemGate token:
+
+```http
+Authorization: Bearer <GEMGATE_TOKEN>
+```
+
+Перед upstream-запросом GemGate удаляет входные `Authorization`, `x-api-key`, `api-key`, `x-goog-api-key` и другие credential-заголовки. Затем выбранный provider adapter добавляет серверный API key.
+
+Это принципиальная граница безопасности: клиент не может подменить provider key и GemGate token не должен оказаться у upstream-сервиса.
+
+## Примеры API
+
+### OpenAI Responses API
 
 ```bash
-curl "http://localhost:8080/v1beta/openai/chat/completions" \
+curl "http://localhost:8080/providers/openai/responses" \
   -H "Authorization: Bearer $GEMGATE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-3.5-flash",
-    "messages": [
-      {"role": "user", "content": "Привет. Ответь коротко."}
-    ],
-    "stream": false
-  }'
+  -d '{"model":"<openai-model>","input":"Say hello in one sentence."}'
 ```
 
-Python OpenAI SDK:
+Для OpenAI SDK используйте provider route как base URL:
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-client-facing-token",
-    base_url="http://localhost:8080/v1beta/openai/",
+    api_key="your-gemgate-token",
+    base_url="http://localhost:8080/providers/openai/",
 )
 
-response = client.chat.completions.create(
-    model="gemini-3.5-flash",
-    messages=[{"role": "user", "content": "Привет. Ответь коротко."}],
+response = client.responses.create(
+    model="<openai-model>",
+    input="Say hello in one sentence.",
 )
-
-print(response.choices[0].message.content)
 ```
 
-Node.js OpenAI SDK:
-
-```js
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  apiKey: process.env.GEMGATE_TOKEN,
-  baseURL: "http://localhost:8080/v1beta/openai/",
-});
-
-const response = await client.chat.completions.create({
-  model: "gemini-3.5-flash",
-  messages: [{ role: "user", content: "Привет. Ответь коротко." }],
-});
-
-console.log(response.choices[0].message.content);
-```
-
-### Native Gemini REST
+### Anthropic Messages API
 
 ```bash
-curl "http://localhost:8080/v1beta/models/gemini-3.5-flash:generateContent" \
+curl "http://localhost:8080/providers/anthropic/v1/messages" \
   -H "Authorization: Bearer $GEMGATE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "contents": [
-      {"parts": [{"text": "Привет. Ответь коротко."}]}
-    ]
+    "model": "<claude-model>",
+    "max_tokens": 256,
+    "messages": [{"role":"user","content":"Hello"}]
   }'
 ```
 
-## TUI: управление
+Клиент не должен передавать реальный `x-api-key`: GemGate выставит его сам.
 
-| Клавиша | Действие |
-| --- | --- |
-| `1` | Overview: live counters, latency, traffic trend, last event. |
-| `2` | Logs: таблица запросов и detail выбранной строки. |
-| `3` | Clients: нагрузка и лимиты по клиентским токенам. |
-| `4` | Routes: расклад по маршрутам и quick-start URL. |
-| `5` | Config: redacted runtime config и security summary. |
-| `6` | Help: подсказки и operational notes. |
-| `tab`, `right`, `l` | Следующий экран. |
-| `shift+tab`, `left`, `h` | Предыдущий экран. |
-| `r` | Обновить данные вручную. |
-| `space`, `p` | Поставить live refresh на паузу или продолжить. |
-| `a` | Logs filter: все записи. |
-| `w` | Logs filter: warnings и 4xx. |
-| `e` | Logs filter: errors и 5xx. |
-| `u` | Logs filter: auth failures. |
-| `j/k`, `up/down` | Скролл таблицы логов. |
-| `pgup/pgdn`, `g`, `G` | Быстрая навигация по логам. |
-| `?` | Развернуть или свернуть help footer. |
-| `q`, `ctrl+c` | Выйти из TUI и остановить server. |
+### Gemini OpenAI compatibility
+
+```text
+http://localhost:8080/providers/gemini/v1beta/openai/
+```
+
+### Gemini native
+
+```text
+http://localhost:8080/providers/gemini/v1beta/models/<model>:generateContent
+```
 
 ## Operational endpoints
 
-Health check, если `server.public_health: true`:
+| Endpoint | Auth | Назначение |
+| --- | --- | --- |
+| `/_healthz` | публичный только при `public_health: true` | health probe |
+| `/_metrics` | GemGate bearer token | Prometheus metrics |
+| `/_config` | GemGate bearer token | redacted runtime config |
 
-```bash
-curl http://localhost:8080/_healthz
-```
+## TUI
 
-Prometheus metrics:
+### Overview
 
-```bash
-curl http://localhost:8080/_metrics \
-  -H "Authorization: Bearer $GEMGATE_TOKEN"
-```
+![GemGate TUI overview](docs/assets/tui-overview.png)
 
-Redacted runtime config:
+### Logs
 
-```bash
-curl http://localhost:8080/_config \
-  -H "Authorization: Bearer $GEMGATE_TOKEN"
-```
+![GemGate TUI logs](docs/assets/tui-logs.png)
 
-Основные метрики:
+### Clients / Routes
 
-| Метрика | Значение |
-| --- | --- |
-| `gemgate_requests_total` | Всего proxied requests. |
-| `gemgate_requests_2xx_total` | Успешные upstream responses. |
-| `gemgate_requests_4xx_total` | Client/upstream 4xx responses. |
-| `gemgate_requests_5xx_total` | Upstream/proxy 5xx responses. |
-| `gemgate_inflight` | Текущие in-flight requests. |
-| `gemgate_bytes_in_total` | Полученные request bytes. |
-| `gemgate_bytes_out_total` | Отправленные response bytes. |
-| `gemgate_auth_failures_total` | Ошибки авторизации. |
-| `gemgate_rate_limited_total` | Запросы, отклоненные client rate limit. |
-| `gemgate_upstream_errors_total` | Transport/upstream errors. |
+![GemGate TUI clients](docs/assets/tui-clients-routes.png)
+
+![GemGate TUI routes](docs/assets/tui-routes.png)
+
+Управление: `1-6`, `Tab`, `Shift+Tab`, `r`, `space/p`, `a/w/e/u`, `?`, `q`.
+
+> Текущий first-time wizard остаётся намеренно простым и создаёт Gemini-конфигурацию. После первого запуска добавьте остальные providers в YAML. Provider protocol logic находится не в TUI, а в `internal/provider`.
 
 ## Docker
 
@@ -329,109 +300,37 @@ curl http://localhost:8080/_config \
 docker compose up --build
 ```
 
-Перед запуском задайте переменные окружения:
-
-```bash
-export GEMINI_API_KEY="your-real-gemini-api-key"
-export GEMGATE_TOKEN="your-client-facing-token-at-least-32-random-chars"
-docker compose up --build
-```
-
-Проверка:
-
-```bash
-curl http://localhost:8080/_healthz
-```
+Перед запуском подготовьте `config.yaml` и передайте секреты через environment/secrets. Не запекайте реальные provider keys в image.
 
 ## Systemd
 
-В репозитории есть пример `gemgate.service`. Типовой порядок:
+В репозитории есть `gemgate.service`; адаптируйте `WorkingDirectory`, `ExecStart`, пользователя и способ доставки секретов под свою систему.
+
+## Разработка
 
 ```bash
-sudo cp gemgate /usr/local/bin/gemgate
-sudo mkdir -p /etc/gemgate
-sudo cp config.example.yaml /etc/gemgate/config.yaml
-sudo cp gemgate.service /etc/systemd/system/gemgate.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gemgate
-sudo systemctl status gemgate
-```
-
-Секреты лучше хранить в отдельном environment file с правами только для root/service user.
-
-## Production notes
-
-- Ставьте TLS edge перед GemGate: Caddy, Nginx, Traefik, Cloudflare Tunnel или load balancer.
-- Не выдавайте клиентам `GEMINI_API_KEY`. Для каждого приложения используйте отдельный `clients[].token`.
-- Для публичных инсталляций задайте `rate_limit_rpm` и внешний rate limit на edge.
-- Храните секреты в Docker secrets, systemd environment files, Vault, Kubernetes secrets или другом secret manager.
-- Для long streaming оставляйте `server.write_timeout: "0s"`, иначе длинные ответы могут обрываться.
-- `rate_limit_rpm` сейчас in-memory per process. При нескольких репликах лимит считается отдельно на каждой реплике.
-- `/_metrics` и `/_config` защищены client token. `/_healthz` может быть публичным только если включен `public_health`.
-
-## Troubleshooting
-
-### `invalid proxy token`
-
-Клиент не передал bearer token или передал не тот токен.
-
-```bash
-curl http://localhost:8080/_metrics \
-  -H "Authorization: Bearer $GEMGATE_TOKEN"
-```
-
-Проверьте, что `clients[].enabled: true` и `clients[].token` совпадает с токеном клиента.
-
-### `upstream.api_key is empty`
-
-`GEMINI_API_KEY` не задан или не подставился в `config.yaml`.
-
-```bash
-echo "$GEMINI_API_KEY"
-```
-
-PowerShell:
-
-```powershell
-$env:GEMINI_API_KEY
-```
-
-### `429 Too Many Requests`
-
-Есть два варианта:
-
-- `client rate limit exceeded`: сработал `clients[].rate_limit_rpm` внутри GemGate.
-- Upstream вернул quota/rate limit: это ограничение Gemini API, GemGate передает его клиенту.
-
-### Streaming обрывается
-
-Проверьте:
-
-- `server.write_timeout: "0s"` в `config.yaml`;
-- timeout reverse proxy перед GemGate;
-- timeout клиента или SDK.
-
-### TUI не нужен на сервере
-
-Используйте headless mode:
-
-```bash
-go run ./cmd/gemgate serve -config config.yaml
-```
-
-## Development
-
-```bash
-go test ./...
+gofmt -w .
+go vet ./...
+go test -race ./...
 go build ./cmd/gemgate
 ```
 
-Структура проекта:
+CI выполняет те же базовые проверки на push/PR.
 
-```text
-cmd/gemgate/          CLI entrypoint
-internal/config/      YAML config, env interpolation, validation
-internal/gateway/     HTTP proxy, auth, metrics, logs, rate limits
-internal/tui/         Charm Bubble Tea terminal UI
-docs/assets/          README screenshots
-```
+Архитектура и правила расширения: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Production notes
+
+- Завершайте TLS на Caddy, Nginx, Traefik, cloud load balancer или private ingress.
+- Выдавайте отдельный GemGate token каждому приложению.
+- Ограничивайте `rate_limit_rpm`, если компрометация клиента может привести к расходам.
+- Для custom `base_url` учитывайте SSRF/egress policy: конфигурация считается доверенной администраторской зоной.
+- `write_timeout: "0s"` обычно нужен для long-lived SSE.
+- Логи хранятся в памяти текущего процесса; для долговременного аудита используйте внешний logging layer.
+- Rate limits также in-memory и не координируются между несколькими replicas.
+
+См. [`SECURITY.md`](SECURITY.md).
+
+## Лицензия
+
+См. [`LICENSE`](LICENSE).
