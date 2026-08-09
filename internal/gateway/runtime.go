@@ -30,6 +30,7 @@ type ReloadResult struct {
 
 func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapshot) (runtimeSnapshot, error) {
 	providers := make(map[string]*providerRuntime, len(rt.Config.Providers))
+	now := time.Now()
 	for _, p := range rt.Config.Providers {
 		spec, ok := provider.Lookup(p.Type)
 		if !ok {
@@ -44,11 +45,19 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 			headers[k] = v
 		}
 		g.metrics.provider(p.Name)
+
+		policy := circuitPolicyFor(rt, p.Name)
+		breaker := newCircuitBreakerWithPolicy(policy)
+		if previous != nil {
+			if oldProvider := previous.providers[p.Name]; oldProvider != nil {
+				breaker = oldProvider.breaker.cloneWithPolicy(policy, now)
+			}
+		}
 		providers[p.Name] = &providerRuntime{
-			name: p.Name, spec: spec, baseURL: u, apiKey: p.APIKey, headers: headers,
+			name: p.Name, spec: spec, baseURL: u, apiKey: p.APIKey, headers: headers, breaker: breaker,
 			client: &http.Client{
 				Timeout:   rt.ProviderTimeouts[p.Name],
-				Transport: newProviderMetricsTransport(p.Name, g.transport, g.metrics),
+				Transport: newProviderMetricsTransport(p.Name, g.transport, g.metrics, breaker),
 			},
 		}
 	}
@@ -81,6 +90,25 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 		tokens: tokens, limits: limits,
 		cors: newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
 	}, nil
+}
+
+func circuitPolicyFor(rt config.Runtime, providerName string) circuitPolicy {
+	configured, ok := rt.ProviderCircuits[providerName]
+	if !ok {
+		return defaultCircuitPolicy()
+	}
+	policy := circuitPolicy{
+		enabled:          configured.Enabled,
+		failureThreshold: configured.FailureThreshold,
+		openFor:          configured.OpenFor,
+	}
+	if policy.failureThreshold <= 0 {
+		policy.failureThreshold = defaultCircuitFailureThreshold
+	}
+	if policy.openFor <= 0 {
+		policy.openFor = defaultCircuitOpenFor
+	}
+	return policy
 }
 
 func (g *Gateway) Reload(rt config.Runtime) (ReloadResult, error) {
