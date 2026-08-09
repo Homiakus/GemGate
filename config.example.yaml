@@ -111,6 +111,19 @@ clients:
     enabled: true
     rate_limit_rpm: 120
 
+# Optional OTLP/HTTP tracing. The endpoint is the full traces URL. It can be
+# omitted to use standard OTEL_EXPORTER_OTLP*_ENDPOINT environment variables.
+# Collector auth headers belong in OTEL_EXPORTER_OTLP_HEADERS or
+# OTEL_EXPORTER_OTLP_TRACES_HEADERS, not in this YAML file.
+telemetry:
+  enabled: false
+  service_name: "gemgate"
+  # endpoint: "http://otel-collector:4318/v1/traces"
+  sample_ratio: 0.10
+  environment: ""
+  # Trace Context propagation to AI providers is opt-in. Baggage is never forwarded.
+  propagate_upstream: false
+
 logging:
   recent: 300
   # Sensitive body/header capture is intentionally unavailable. true is rejected.
@@ -126,3 +139,4 @@ logging:
 # Restart required:
 # - server listen/read/write/idle timeout settings
 # - rate_limit backend/Redis URL, key prefix, timeout and fail_open policy
+# - telemetry enabled/service/endpoint/sampling/environment/propagation settings
