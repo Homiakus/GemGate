@@ -1,0 +1,117 @@
+name: Redis Sentinel E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "internal/gateway/ratelimit*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/sentinel.yml"
+  pull_request:
+    paths:
+      - "internal/gateway/ratelimit*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/sentinel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sentinel-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Start Redis master replica and Sentinels
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create gemgate-sentinel
+
+          docker run -d --name redis-master \
+            --network gemgate-sentinel \
+            redis:8-alpine \
+            redis-server --protected-mode no --appendonly no
+
+          docker run -d --name redis-replica \
+            --network gemgate-sentinel \
+            redis:8-alpine \
+            redis-server --protected-mode no --appendonly no \
+              --replicaof redis-master 6379
+
+          for i in 1 2 3; do
+            dir="$RUNNER_TEMP/gemgate-sentinel-$i"
+            mkdir -p "$dir"
+            cat > "$dir/sentinel.conf" <<'EOF'
+          port 26379
+          protected-mode no
+          dir /data
+          sentinel resolve-hostnames yes
+          sentinel monitor gemgate-master redis-master 6379 2
+          sentinel down-after-milliseconds gemgate-master 1000
+          sentinel failover-timeout gemgate-master 10000
+          sentinel parallel-syncs gemgate-master 1
+          EOF
+            host_port=$((26378 + i))
+            docker run -d --name "sentinel-$i" \
+              --network gemgate-sentinel \
+              -p "${host_port}:26379" \
+              -v "$dir:/data" \
+              redis:8-alpine \
+              redis-sentinel /data/sentinel.conf
+          done
+
+      - name: Wait for Sentinel quorum
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if docker exec sentinel-1 redis-cli -p 26379 SENTINEL CKQUORUM gemgate-master 2>/dev/null | grep -q '^OK'; then
+              echo "Sentinel quorum is ready"
+              docker exec sentinel-1 redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME gemgate-master
+              exit 0
+            fi
+            sleep 0.5
+          done
+          docker logs sentinel-1
+          docker logs sentinel-2
+          docker logs sentinel-3
+          exit 1
+
+      - name: Exercise live master promotion
+        env:
+          GEMGATE_TEST_SENTINEL_URL: "redis://127.0.0.1:26379/0?master_name=gemgate-master&addr=127.0.0.1%3A26380&addr=127.0.0.1%3A26381"
+          GEMGATE_TEST_SENTINEL_ADDR: "127.0.0.1:26379"
+        run: go test ./internal/gateway -run '^TestRedisSentinelFailoverKeepsLimiterAvailable$' -count=1 -v
+
+      - name: Dump Redis topology on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker ps -a || true
+          docker logs redis-master || true
+          docker logs redis-replica || true
+          docker logs sentinel-1 || true
+          docker logs sentinel-2 || true
+          docker logs sentinel-3 || true
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f sentinel-1 sentinel-2 sentinel-3 redis-replica redis-master 2>/dev/null || true
+          docker network rm gemgate-sentinel 2>/dev/null || true
