@@ -10,17 +10,17 @@ import (
 )
 
 type Metrics struct {
-	StartedAt             time.Time
-	Requests              atomic.Uint64
-	Requests2xx           atomic.Uint64
-	Requests4xx           atomic.Uint64
-	Requests5xx           atomic.Uint64
-	BytesIn               atomic.Uint64
-	BytesOut              atomic.Uint64
-	InFlight              atomic.Int64
-	UpstreamErrors        atomic.Uint64
-	AuthFailures          atomic.Uint64
-	RateLimited           atomic.Uint64
+	StartedAt              time.Time
+	Requests               atomic.Uint64
+	Requests2xx            atomic.Uint64
+	Requests4xx            atomic.Uint64
+	Requests5xx            atomic.Uint64
+	BytesIn                atomic.Uint64
+	BytesOut               atomic.Uint64
+	InFlight               atomic.Int64
+	UpstreamErrors         atomic.Uint64
+	AuthFailures           atomic.Uint64
+	RateLimited            atomic.Uint64
 	RateLimitBackendErrors atomic.Uint64
 
 	providersMu sync.RWMutex
