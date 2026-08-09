@@ -30,11 +30,21 @@ providers:
     # api_key_file: "/run/secrets/gemini_api_key"
     timeout: "0s"
 
+    # Optional provider-local resilience policy. All fields are hot-reloadable.
+    # Defaults are shown below. Set enabled: false for local/test providers if desired.
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      open_for: "30s"
+
   # Uncomment the providers you use. Built-in types supply their standard base_url.
   # A provider may use api_key OR api_key_file, never both.
   # - name: openai
   #   type: openai
   #   api_key_file: "/run/secrets/openai_api_key"
+  #   circuit_breaker:
+  #     failure_threshold: 5
+  #     open_for: "30s"
   #
   # - name: anthropic
   #   type: anthropic
@@ -73,6 +83,8 @@ providers:
   # - name: local
   #   type: openai-compatible
   #   base_url: "http://127.0.0.1:11434/v1"
+  #   circuit_breaker:
+  #     enabled: false
 
 clients:
   - name: "local-dev"
@@ -88,12 +100,11 @@ logging:
   log_headers: false
 
 # Hot-reloadable without dropping in-flight requests:
-# - providers/default_provider, base_url, keys, headers, provider timeout
+# - providers/default_provider, base_url, keys, headers, provider timeout, circuit policy
 # - clients/tokens/enabled/rate_limit_rpm
 # - CORS, request_body_limit, logging.recent
 # Listener and server read/write/idle timeouts require restart.
 #
-# Resilience defaults are deliberately conservative and do not retry requests:
-# - provider circuit opens after 5 consecutive transport/5xx failures
-# - open period: 30s
-# - after cooldown exactly one half-open probe is admitted
+# Circuit breakers never automatically retry user generation requests. While open,
+# GemGate returns a local 503 + Retry-After; after cooldown one half-open request
+# probes recovery. Transport errors and 5xx count as failures; 4xx/429 do not.
