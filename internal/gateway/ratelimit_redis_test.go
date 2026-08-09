@@ -30,7 +30,7 @@ func TestRedisRateLimitIsSharedAcrossInstances(t *testing.T) {
 	rt := config.Runtime{
 		Config: config.Config{RateLimit: config.RateLimitConfig{
 			Backend: "redis",
-			Redis: config.RedisRateLimitConfig{URL: redisURL, KeyPrefix: prefix, Timeout: "1s"},
+			Redis:   config.RedisRateLimitConfig{URL: redisURL, KeyPrefix: prefix, Timeout: "1s"},
 		}},
 		RateLimitTimeout: time.Second,
 	}
@@ -67,7 +67,7 @@ func TestRedisRateLimitFailOpen(t *testing.T) {
 	rt := config.Runtime{
 		Config: config.Config{RateLimit: config.RateLimitConfig{
 			Backend: "redis",
-			Redis: config.RedisRateLimitConfig{URL: "redis://127.0.0.1:1/0", KeyPrefix: "gemgate:test:failopen:", Timeout: "50ms", FailOpen: true},
+			Redis:   config.RedisRateLimitConfig{URL: "redis://127.0.0.1:1/0", KeyPrefix: "gemgate:test:failopen:", Timeout: "50ms", FailOpen: true},
 		}},
 		RateLimitTimeout: 50 * time.Millisecond,
 	}
