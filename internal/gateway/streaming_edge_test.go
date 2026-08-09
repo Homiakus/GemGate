@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,5 +160,66 @@ func TestUpstreamDisconnectAfterHeadersDoesNotRewriteResponse(t *testing.T) {
 	}
 	if metrics[0].TransportErrors != 1 {
 		t.Fatalf("provider transport errors=%d, want 1 after truncated response body", metrics[0].TransportErrors)
+	}
+}
+
+func TestMalformedChunkedProviderResponseKeepsPartialStreamAndRecordsFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverErr <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req, readErr := http.ReadRequest(bufio.NewReader(conn))
+		if readErr != nil {
+			serverErr <- readErr
+			return
+		}
+		_ = req.Body.Close()
+		// One complete SSE chunk is sent, but the terminating zero-length chunk is
+		// deliberately omitted. net/http must surface unexpected EOF to GemGate.
+		_, writeErr := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nA\r\ndata: hi\n\n\r\n")
+		serverErr <- writeErr
+	}()
+
+	rt := runtimeForTests([]config.ProviderConfig{{
+		Name: "openai", Type: "openai", BaseURL: "http://" + listener.Addr().String(), APIKey: "provider-key",
+	}}, "openai")
+	gw, err := New(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer client-token")
+	resp := httptest.NewRecorder()
+	gw.ServeHTTP(resp, req)
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("raw upstream: %v", err)
+	}
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", resp.Code, resp.Body.String())
+	}
+	if resp.Body.String() != "data: hi\n\n" {
+		t.Fatalf("partial chunked stream changed: %q", resp.Body.String())
+	}
+	if got := gw.Metrics().UpstreamErrors; got != 1 {
+		t.Fatalf("upstream errors=%d, want 1", got)
+	}
+	providers := gw.Metrics().Providers
+	if len(providers) != 1 || providers[0].TransportErrors != 1 {
+		t.Fatalf("provider transport accounting=%#v", providers)
+	}
+	if providers[0].Health == "healthy" {
+		t.Fatalf("truncated chunked stream must not look healthy: %#v", providers[0])
 	}
 }
