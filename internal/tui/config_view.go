@@ -22,6 +22,22 @@ func (m Model) configView() string {
 	if m.cfg.DedicatedOperationsAuth {
 		operationsAuth = "dedicated token"
 	}
+	tracing := "off"
+	if m.cfg.TelemetryEnabled {
+		collector := "environment/default endpoint"
+		if m.cfg.TelemetryEndpointConfigured {
+			collector = "configured endpoint"
+		}
+		tracing = fmt.Sprintf("OTLP %s sample=%.2f propagate=%t (%s)",
+			m.cfg.TelemetryServiceName,
+			m.cfg.TelemetrySampleRatio,
+			m.cfg.TelemetryPropagateUpstream,
+			collector,
+		)
+		if m.cfg.TelemetryEnvironment != "" {
+			tracing += " env=" + m.cfg.TelemetryEnvironment
+		}
+	}
 	lines := []string{
 		subtitleStyle.Render("Runtime config"), "",
 		labelStyle.Render("listen:") + "              " + textStyle.Render(m.cfg.Listen),
@@ -31,6 +47,7 @@ func (m Model) configView() string {
 		labelStyle.Render("operations_auth:") + "     " + textStyle.Render(operationsAuth),
 		labelStyle.Render("request_body_limit:") + "  " + textStyle.Render(m.cfg.RequestBodyLimit),
 		labelStyle.Render("rate_limit:") + "          " + textStyle.Render(rateLimit),
+		labelStyle.Render("tracing:") + "             " + textStyle.Render(tracing),
 		labelStyle.Render("cors:") + "                " + textStyle.Render(origins),
 		labelStyle.Render("recent_logs:") + "         " + textStyle.Render(fmt.Sprintf("%d", m.cfg.LogRecent)),
 		"", subtitleStyle.Render("Configured providers"), "",
@@ -54,6 +71,8 @@ func (m Model) configView() string {
 		textStyle.Render("• application and operations bearer tokens can be separated into independent trust domains"),
 		textStyle.Render("• provider credentials are sanitized from inbound requests and injected server-side"),
 		textStyle.Render("• Redis rate-limit keys use token hashes; Redis credentials are never shown here"),
+		textStyle.Render("• tracing captures bounded metadata only; collector endpoint and auth are never shown here"),
+		textStyle.Render("• trace context propagation to AI providers is explicit opt-in; baggage is never forwarded"),
 		textStyle.Render("• config, secrets and provider circuit policies are swapped atomically on hot reload"),
 		textStyle.Render("• browser CORS policy is explicit; server-to-server clients are unaffected"),
 		textStyle.Render("• provider quota, billing and safety responses pass through unchanged"),
