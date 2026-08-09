@@ -1,0 +1,82 @@
+server:
+  listen: ":8080"
+  read_timeout: "30s"
+  write_timeout: "0s"       # keep 0s for long-lived streaming responses
+  idle_timeout: "120s"
+  public_health: true
+  request_body_limit: "32MiB"
+
+  # Browser CORS policy. Non-browser/server-to-server clients are unaffected.
+  # Prefer an explicit allow-list in production. Set enabled: false if browsers
+  # never call GemGate directly.
+  cors:
+    enabled: true
+    allowed_origins:
+      - "http://localhost:3000"
+    allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    allowed_headers: ["Authorization", "Content-Type", "X-Request-ID"]
+    allow_credentials: false
+    max_age: "10m"
+
+default_provider: gemini
+
+providers:
+  - name: gemini
+    type: gemini
+    api_key: "${GEMINI_API_KEY}"
+    timeout: "0s"
+
+  # Uncomment the providers you use. Built-in types supply their standard base_url.
+  # - name: openai
+  #   type: openai
+  #   api_key: "${OPENAI_API_KEY}"
+  #
+  # - name: anthropic
+  #   type: anthropic
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   headers:
+  #     Anthropic-Version: "2023-06-01"
+  #
+  # - name: groq
+  #   type: groq
+  #   api_key: "${GROQ_API_KEY}"
+  #
+  # - name: mistral
+  #   type: mistral
+  #   api_key: "${MISTRAL_API_KEY}"
+  #
+  # - name: openrouter
+  #   type: openrouter
+  #   api_key: "${OPENROUTER_API_KEY}"
+  #   headers:
+  #     HTTP-Referer: "https://example.com"
+  #     X-Title: "GemGate"
+  #
+  # - name: deepseek
+  #   type: deepseek
+  #   api_key: "${DEEPSEEK_API_KEY}"
+  #
+  # - name: xai
+  #   type: xai
+  #   api_key: "${XAI_API_KEY}"
+  #
+  # - name: cohere
+  #   type: cohere
+  #   api_key: "${COHERE_API_KEY}"
+  #
+  # Generic OpenAI-compatible endpoint. api_key is optional for local/no-auth servers.
+  # - name: local
+  #   type: openai-compatible
+  #   base_url: "http://127.0.0.1:11434/v1"
+  #   api_key: ""
+
+clients:
+  - name: "local-dev"
+    token: "${GEMGATE_TOKEN}"
+    enabled: true
+    rate_limit_rpm: 120
+
+logging:
+  recent: 300
+  log_body: false
+  log_headers: false
