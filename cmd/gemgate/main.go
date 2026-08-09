@@ -19,7 +19,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -54,8 +54,12 @@ func main() {
 func run(withTUI bool, args []string) error {
 	fs := flag.NewFlagSet("gemgate", flag.ContinueOnError)
 	configPath := fs.String("config", "config.yaml", "path to YAML config")
+	reloadInterval := fs.Duration("reload-interval", 5*time.Second, "config/secret reload interval; 0 disables hot reload")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *reloadInterval < 0 {
+		return fmt.Errorf("reload-interval must not be negative")
 	}
 
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
@@ -76,23 +80,62 @@ func run(withTUI bool, args []string) error {
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- gw.ListenAndServe() }()
 
+	reloadCtx, cancelReload := context.WithCancel(context.Background())
+	defer cancelReload()
+	if *reloadInterval > 0 {
+		go watchConfig(reloadCtx, *configPath, *reloadInterval, gw)
+	}
+
 	if withTUI {
 		p := tea.NewProgram(tui.New(gw))
 		if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrInterrupted) {
+			cancelReload()
 			_ = shutdown(gw)
 			return err
 		}
+		cancelReload()
 		return shutdown(gw)
 	}
 
 	printRuntimeInfo(gw.ConfigSnapshot())
+	if *reloadInterval > 0 {
+		fmt.Printf("Hot reload: every %s (invalid revisions are rejected atomically)\n", reloadInterval.String())
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-stop:
+		cancelReload()
 		return shutdown(gw)
 	case err := <-serverErr:
+		cancelReload()
 		return err
+	}
+}
+
+func watchConfig(ctx context.Context, path string, interval time.Duration, gw *gateway.Gateway) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rt, err := config.Load(path)
+			if err != nil {
+				gw.RecordReloadFailure(err)
+				log.Printf("config reload: %v", err)
+				continue
+			}
+			result, err := gw.Reload(rt)
+			if err != nil {
+				log.Printf("config reload: %v", err)
+				continue
+			}
+			if result.Changed {
+				log.Printf("config reload applied: providers=%d clients=%d", result.Providers, result.Clients)
+			}
+		}
 	}
 }
 
@@ -151,11 +194,16 @@ func usage() {
 	fmt.Print(`GemGate — multi-provider AI API gateway with Charm TUI
 
 Usage:
-  gemgate run       -config config.yaml   # server + TUI
-  gemgate tui       -config config.yaml   # alias for run
-  gemgate serve     -config config.yaml   # headless server
-  gemgate providers                       # list built-in provider types
+  gemgate run       -config config.yaml [-reload-interval 5s]  # server + TUI
+  gemgate tui       -config config.yaml [-reload-interval 5s]  # alias for run
+  gemgate serve     -config config.yaml [-reload-interval 5s]  # headless server
+  gemgate providers                                           # list built-in provider types
   gemgate version
+
+Hot reload:
+  Config, provider keys, client tokens, CORS, providers and request limits are
+  validated and swapped atomically. Listener/read/write/idle timeout changes
+  require restart. Set -reload-interval 0 to disable polling.
 
 Routing:
   /providers/<name>/<path>  -> named provider, prefix stripped
