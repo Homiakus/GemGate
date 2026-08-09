@@ -17,7 +17,6 @@ type runtimeSnapshot struct {
 	providers       map[string]*providerRuntime
 	defaultProvider *providerRuntime
 	tokens          map[string]clientAuth
-	limits          map[string]*rateWindow
 	cors            *corsHandler
 }
 
@@ -67,28 +66,17 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 	}
 
 	tokens := make(map[string]clientAuth)
-	limits := make(map[string]*rateWindow)
 	for _, c := range rt.Config.Clients {
 		if !c.Enabled {
 			continue
 		}
 		tokens[c.Token] = clientAuth{Name: c.Name, RateLimitRPM: c.RateLimitRPM}
-		if c.RateLimitRPM <= 0 {
-			continue
-		}
-		if previous != nil {
-			if existing := previous.limits[c.Token]; existing != nil {
-				limits[c.Token] = existing
-				continue
-			}
-		}
-		limits[c.Token] = &rateWindow{}
 	}
 
 	return runtimeSnapshot{
 		cfg: rt, providers: providers, defaultProvider: defaultProvider,
-		tokens: tokens, limits: limits,
-		cors: newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
+		tokens: tokens,
+		cors:   newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
 	}, nil
 }
 
@@ -133,6 +121,7 @@ func (g *Gateway) Reload(rt config.Runtime) (ReloadResult, error) {
 	g.runtimeMu.Lock()
 	g.runtime = next
 	g.runtimeMu.Unlock()
+	g.rateLimits.RetainTokens(next.tokens)
 	g.logs.Resize(rt.Config.Logging.Recent)
 
 	now := time.Now()

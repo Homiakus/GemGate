@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 var errBodyTooLarge = errors.New("request body too large")
@@ -140,23 +139,6 @@ func authenticate(state runtimeSnapshot, r *http.Request) (clientAuth, string, b
 	}
 	info, ok := state.tokens[token]
 	return info, token, ok
-}
-
-func allowClient(state runtimeSnapshot, token string, limit int) bool {
-	window := state.limits[token]
-	if window == nil {
-		return true
-	}
-	ok, _ := window.allow(limit, time.Now())
-	return ok
-}
-
-func rateLimitReset(state runtimeSnapshot, token string) time.Duration {
-	window := state.limits[token]
-	if window == nil {
-		return 0
-	}
-	return window.resetAfter(time.Now())
 }
 
 func safeConfig(state runtimeSnapshot) map[string]any {

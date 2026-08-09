@@ -19,11 +19,12 @@ type Gateway struct {
 	reloadMu  sync.Mutex
 	runtime   runtimeSnapshot
 
-	transport *http.Transport
-	metrics   *Metrics
-	logs      *LogRing
-	server    *http.Server
-	started   time.Time
+	transport  *http.Transport
+	rateLimits *rateLimitManager
+	metrics    *Metrics
+	logs       *LogRing
+	server     *http.Server
+	started    time.Time
 }
 
 type providerRuntime struct {
@@ -92,16 +93,19 @@ func New(rt config.Runtime) (*Gateway, error) {
 	transport.ResponseHeaderTimeout = 0 // model generation may take a long time before first byte
 
 	gw := &Gateway{
-		transport: transport,
-		metrics:   NewMetrics(),
-		logs:      NewLogRing(rt.Config.Logging.Recent),
-		started:   time.Now(),
+		transport:  transport,
+		rateLimits: newRateLimitManager(),
+		metrics:    NewMetrics(),
+		logs:       NewLogRing(rt.Config.Logging.Recent),
+		started:    time.Now(),
 	}
 	state, err := buildRuntimeSnapshot(gw, rt, nil)
 	if err != nil {
+		_ = gw.rateLimits.Close()
 		return nil, err
 	}
 	gw.runtime = state
+	gw.rateLimits.RetainTokens(state.tokens)
 	gw.server = &http.Server{
 		Addr:              rt.Config.Server.Listen,
 		Handler:           gw,
@@ -131,7 +135,12 @@ func (g *Gateway) ListenAndServe() error {
 
 func (g *Gateway) Shutdown(ctx context.Context) error {
 	g.logs.Add(LogEntry{Level: "info", Message: "server shutdown requested", Client: "system"})
-	return g.server.Shutdown(ctx)
+	serverErr := g.server.Shutdown(ctx)
+	limitErr := g.rateLimits.Close()
+	if serverErr != nil {
+		return serverErr
+	}
+	return limitErr
 }
 
 func (g *Gateway) Addr() string { return g.server.Addr }
@@ -227,12 +236,18 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		return
 	}
 
-	if !allowClient(state, token, auth.RateLimitRPM) {
+	decision, err := g.rateLimits.Allow(r.Context(), token, auth.RateLimitRPM, time.Now())
+	if err != nil {
+		recordStatus(g.metrics, http.StatusServiceUnavailable)
+		g.logs.Add(LogEntry{Time: start, Level: "error", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusServiceUnavailable, Duration: time.Since(start), RequestID: reqID, Message: "rate limit backend unavailable: " + err.Error()})
+		http.Error(w, "rate limit backend unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !decision.Allowed {
 		g.metrics.RateLimited.Add(1)
 		recordStatus(g.metrics, http.StatusTooManyRequests)
-		reset := rateLimitReset(state, token)
-		if reset > 0 {
-			retryAfter := max(1, int(reset.Round(time.Second).Seconds()))
+		if decision.RetryAfter > 0 {
+			retryAfter := max(1, int(decision.RetryAfter.Round(time.Second).Seconds()))
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
 		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: auth.Name, ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusTooManyRequests, Duration: time.Since(start), RequestID: reqID, Message: "rate limit exceeded"})
