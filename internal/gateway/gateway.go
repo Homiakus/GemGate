@@ -178,16 +178,21 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		})
 	}
 	return ConfigSnapshot{
-		Listen: state.cfg.Config.Server.Listen, PublicHealth: state.cfg.Config.Server.PublicHealth,
-		RequestBodyLimit: state.cfg.Config.Server.RequestBodyLimit,
-		TrustedProxies:   append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
+		Listen:                  state.cfg.Config.Server.Listen,
+		PublicHealth:            state.cfg.Config.Server.PublicHealth,
+		RequestBodyLimit:        state.cfg.Config.Server.RequestBodyLimit,
+		TrustedProxies:          append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
 		DedicatedOperationsAuth: state.operationsToken != "",
-		RateLimitBackend: g.rateLimits.Name(), RateLimitFailOpen: g.rateLimits.FailOpen(),
-		UpstreamBaseURL: state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
-		DefaultProvider: state.cfg.Config.DefaultProvider, Providers: providers,
-		LogRecent: state.cfg.Config.Logging.Recent, Clients: clients,
-		CORSEnabled: state.cfg.Config.Server.CORS.IsEnabled(),
-		CORSOrigins: append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
+		RateLimitBackend:        g.rateLimits.Name(),
+		RateLimitFailOpen:       g.rateLimits.FailOpen(),
+		UpstreamBaseURL:         state.defaultProvider.baseURL.String(),
+		UpstreamAPIKey:          redact(state.defaultProvider.apiKey),
+		DefaultProvider:         state.cfg.Config.DefaultProvider,
+		Providers:               providers,
+		LogRecent:               state.cfg.Config.Logging.Recent,
+		Clients:                 clients,
+		CORSEnabled:             state.cfg.Config.Server.CORS.IsEnabled(),
+		CORSOrigins:             append([]string(nil), state.cfg.Config.Server.CORS.AllowedOrigins...),
 	}
 }
 
