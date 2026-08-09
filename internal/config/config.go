@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -48,23 +49,26 @@ func (c CORSConfig) IsEnabled() bool {
 }
 
 type UpstreamConfig struct {
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Timeout string `yaml:"timeout"`
+	BaseURL    string `yaml:"base_url"`
+	APIKey     string `yaml:"api_key"`
+	APIKeyFile string `yaml:"api_key_file,omitempty"`
+	Timeout    string `yaml:"timeout"`
 }
 
 type ProviderConfig struct {
-	Name    string            `yaml:"name"`
-	Type    string            `yaml:"type"`
-	BaseURL string            `yaml:"base_url,omitempty"`
-	APIKey  string            `yaml:"api_key,omitempty"`
-	Timeout string            `yaml:"timeout,omitempty"`
-	Headers map[string]string `yaml:"headers,omitempty"`
+	Name       string            `yaml:"name"`
+	Type       string            `yaml:"type"`
+	BaseURL    string            `yaml:"base_url,omitempty"`
+	APIKey     string            `yaml:"api_key,omitempty"`
+	APIKeyFile string            `yaml:"api_key_file,omitempty"`
+	Timeout    string            `yaml:"timeout,omitempty"`
+	Headers    map[string]string `yaml:"headers,omitempty"`
 }
 
 type ClientConfig struct {
 	Name         string `yaml:"name"`
-	Token        string `yaml:"token"`
+	Token        string `yaml:"token,omitempty"`
+	TokenFile    string `yaml:"token_file,omitempty"`
 	Enabled      bool   `yaml:"enabled"`
 	RateLimitRPM int    `yaml:"rate_limit_rpm"`
 }
@@ -109,6 +113,10 @@ func Load(path string) (Runtime, error) {
 		return Runtime{}, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&cfg)
+	if err := resolveSecretFiles(&cfg, filepath.Dir(path)); err != nil {
+		return Runtime{}, err
+	}
+	syncLegacyUpstream(&cfg)
 
 	rt := Runtime{Config: cfg, ProviderTimeouts: make(map[string]time.Duration, len(cfg.Providers))}
 	if rt.ReadTimeout, err = parseDuration(cfg.Server.ReadTimeout); err != nil {
@@ -200,11 +208,12 @@ func applyDefaults(cfg *Config) {
 			cfg.Upstream.Timeout = "0s"
 		}
 		cfg.Providers = []ProviderConfig{{
-			Name:    "gemini",
-			Type:    "gemini",
-			BaseURL: cfg.Upstream.BaseURL,
-			APIKey:  cfg.Upstream.APIKey,
-			Timeout: cfg.Upstream.Timeout,
+			Name:       "gemini",
+			Type:       "gemini",
+			BaseURL:    cfg.Upstream.BaseURL,
+			APIKey:     cfg.Upstream.APIKey,
+			APIKeyFile: cfg.Upstream.APIKeyFile,
+			Timeout:    cfg.Upstream.Timeout,
 		}}
 		if cfg.DefaultProvider == "" {
 			cfg.DefaultProvider = "gemini"
@@ -215,6 +224,7 @@ func applyDefaults(cfg *Config) {
 		p := &cfg.Providers[i]
 		p.Name = strings.TrimSpace(p.Name)
 		p.Type = provider.NormalizeType(p.Type)
+		p.APIKeyFile = strings.TrimSpace(p.APIKeyFile)
 		if p.Type == "" {
 			p.Type = "openai-compatible"
 		}
@@ -226,15 +236,70 @@ func applyDefaults(cfg *Config) {
 			p.Timeout = "0s"
 		}
 	}
+	for i := range cfg.Clients {
+		cfg.Clients[i].TokenFile = strings.TrimSpace(cfg.Clients[i].TokenFile)
+	}
 	if cfg.DefaultProvider == "" && len(cfg.Providers) > 0 {
 		cfg.DefaultProvider = cfg.Providers[0].Name
 	}
+	syncLegacyUpstream(cfg)
+}
 
-	// Keep legacy snapshot fields useful for existing TUI/code paths.
+func resolveSecretFiles(cfg *Config, baseDir string) error {
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if strings.TrimSpace(p.APIKey) != "" && p.APIKeyFile != "" {
+			return fmt.Errorf("provider %q: api_key and api_key_file are mutually exclusive", p.Name)
+		}
+		if p.APIKeyFile == "" {
+			continue
+		}
+		secret, err := readSecretFile(baseDir, p.APIKeyFile)
+		if err != nil {
+			return fmt.Errorf("provider %q api_key_file: %w", p.Name, err)
+		}
+		p.APIKey = secret
+	}
+	for i := range cfg.Clients {
+		c := &cfg.Clients[i]
+		if strings.TrimSpace(c.Token) != "" && c.TokenFile != "" {
+			return fmt.Errorf("client %q: token and token_file are mutually exclusive", c.Name)
+		}
+		if c.TokenFile == "" {
+			continue
+		}
+		secret, err := readSecretFile(baseDir, c.TokenFile)
+		if err != nil {
+			return fmt.Errorf("client %q token_file: %w", c.Name, err)
+		}
+		c.Token = secret
+	}
+	return nil
+}
+
+func readSecretFile(baseDir, name string) (string, error) {
+	path := name
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(string(b))
+	if secret == "" {
+		return "", errors.New("secret file is empty")
+	}
+	return secret, nil
+}
+
+func syncLegacyUpstream(cfg *Config) {
 	for _, p := range cfg.Providers {
 		if p.Name == cfg.DefaultProvider {
-			cfg.Upstream = UpstreamConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, Timeout: p.Timeout}
-			break
+			cfg.Upstream = UpstreamConfig{
+				BaseURL: p.BaseURL, APIKey: p.APIKey, APIKeyFile: p.APIKeyFile, Timeout: p.Timeout,
+			}
+			return
 		}
 	}
 }
@@ -267,7 +332,7 @@ func validate(rt Runtime) error {
 			return fmt.Errorf("provider %q has unsupported type %q", p.Name, p.Type)
 		}
 		if spec.RequiresAPIKey && strings.TrimSpace(p.APIKey) == "" {
-			return fmt.Errorf("provider %q (%s) requires api_key", p.Name, p.Type)
+			return fmt.Errorf("provider %q (%s) requires api_key or api_key_file", p.Name, p.Type)
 		}
 		if strings.TrimSpace(p.BaseURL) == "" {
 			return fmt.Errorf("provider %q requires base_url", p.Name)
@@ -299,7 +364,7 @@ func validate(rt Runtime) error {
 			return errors.New("enabled client has empty name")
 		}
 		if strings.TrimSpace(c.Token) == "" {
-			return fmt.Errorf("client %q has empty token", c.Name)
+			return fmt.Errorf("client %q has empty token; set token or token_file", c.Name)
 		}
 		if _, ok := seenTokens[c.Token]; ok {
 			return fmt.Errorf("duplicate client token for %q", c.Name)
@@ -311,7 +376,7 @@ func validate(rt Runtime) error {
 		activeClients++
 	}
 	if activeClients == 0 {
-		return errors.New("no enabled clients; add at least one clients[].token")
+		return errors.New("no enabled clients; add at least one clients[].token or token_file")
 	}
 	if rt.RequestBodyLimit < 0 {
 		return errors.New("request_body_limit must not be negative")
