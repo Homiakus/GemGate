@@ -45,11 +45,14 @@ func TestGatewayRejectsOverClientRateLimit(t *testing.T) {
 
 	gw, err := New(config.Runtime{
 		Config: config.Config{
-			Server: config.ServerConfig{Listen: ":0"},
-			Upstream: config.UpstreamConfig{
+			Server:          config.ServerConfig{Listen: ":0"},
+			DefaultProvider: "gemini",
+			Providers: []config.ProviderConfig{{
+				Name:    "gemini",
+				Type:    "gemini",
 				BaseURL: upstream.URL,
 				APIKey:  "gemini-key",
-			},
+			}},
 			Clients: []config.ClientConfig{{
 				Name:         "local-dev",
 				Token:        "client-token",
@@ -57,6 +60,7 @@ func TestGatewayRejectsOverClientRateLimit(t *testing.T) {
 				RateLimitRPM: 1,
 			}},
 		},
+		ProviderTimeouts: map[string]time.Duration{"gemini": 0},
 	})
 	if err != nil {
 		t.Fatal(err)
