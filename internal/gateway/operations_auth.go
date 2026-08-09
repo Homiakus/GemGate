@@ -27,6 +27,10 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(parts[1])
 }
 
+func operationsAuthChallenge() string {
+	return "Bearer realm=" + string(rune(34)) + "gemgate-operations" + string(rune(34))
+}
+
 func isOperationalPath(path string) bool {
 	switch path {
 	case "/_healthz", "/_readyz", "/_metrics", "/_config":
