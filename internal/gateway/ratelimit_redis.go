@@ -15,8 +15,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const redisRateWindowMS int64 = 60_000
-
 var redisRateScript = redis.NewScript(`
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
@@ -86,8 +84,8 @@ func (b *redisRateLimitBackend) Allow(ctx context.Context, key string, limit int
 }
 
 func (b *redisRateLimitBackend) Retain(map[string]struct{}) {}
-func (b *redisRateLimitBackend) Close() error { return b.client.Close() }
-func (b *redisRateLimitBackend) Name() string { return "redis" }
+func (b *redisRateLimitBackend) Close() error               { return b.client.Close() }
+func (b *redisRateLimitBackend) Name() string               { return "redis" }
 
 func redisInt64(value any) (int64, error) {
 	switch v := value.(type) {
