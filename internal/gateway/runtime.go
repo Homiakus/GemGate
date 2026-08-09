@@ -17,6 +17,7 @@ type runtimeSnapshot struct {
 	providers       map[string]*providerRuntime
 	defaultProvider *providerRuntime
 	tokens          map[string]clientAuth
+	operationsToken string
 	cors            *corsHandler
 }
 
@@ -75,8 +76,9 @@ func buildRuntimeSnapshot(g *Gateway, rt config.Runtime, previous *runtimeSnapsh
 
 	return runtimeSnapshot{
 		cfg: rt, providers: providers, defaultProvider: defaultProvider,
-		tokens: tokens,
-		cors:   newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
+		tokens:          tokens,
+		operationsToken: rt.Config.Operations.Token,
+		cors:            newCORSPolicy(rt.Config.Server.CORS, rt.CORSMaxAge),
 	}, nil
 }
 

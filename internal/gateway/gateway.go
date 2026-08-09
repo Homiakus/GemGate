@@ -62,20 +62,21 @@ type ProviderSnapshot struct {
 }
 
 type ConfigSnapshot struct {
-	Listen            string
-	PublicHealth      bool
-	RequestBodyLimit  string
-	TrustedProxies    []string
-	RateLimitBackend  string
-	RateLimitFailOpen bool
-	UpstreamBaseURL   string // compatibility alias for default provider
-	UpstreamAPIKey    string // compatibility alias for default provider
-	DefaultProvider   string
-	Providers         []ProviderSnapshot
-	LogRecent         int
-	Clients           []ClientSnapshot
-	CORSEnabled       bool
-	CORSOrigins       []string
+	Listen                  string
+	PublicHealth            bool
+	RequestBodyLimit        string
+	TrustedProxies          []string
+	DedicatedOperationsAuth bool
+	RateLimitBackend        string
+	RateLimitFailOpen       bool
+	UpstreamBaseURL         string // compatibility alias for default provider
+	UpstreamAPIKey          string // compatibility alias for default provider
+	DefaultProvider         string
+	Providers               []ProviderSnapshot
+	LogRecent               int
+	Clients                 []ClientSnapshot
+	CORSEnabled             bool
+	CORSOrigins             []string
 }
 
 type proxyResult struct {
@@ -180,6 +181,7 @@ func (g *Gateway) ConfigSnapshot() ConfigSnapshot {
 		Listen: state.cfg.Config.Server.Listen, PublicHealth: state.cfg.Config.Server.PublicHealth,
 		RequestBodyLimit: state.cfg.Config.Server.RequestBodyLimit,
 		TrustedProxies:   append([]string(nil), state.cfg.Config.Server.TrustedProxies...),
+		DedicatedOperationsAuth: state.operationsToken != "",
 		RateLimitBackend: g.rateLimits.Name(), RateLimitFailOpen: g.rateLimits.FailOpen(),
 		UpstreamBaseURL: state.defaultProvider.baseURL.String(), UpstreamAPIKey: redact(state.defaultProvider.apiKey),
 		DefaultProvider: state.cfg.Config.DefaultProvider, Providers: providers,
@@ -216,30 +218,35 @@ func (g *Gateway) serveHTTP(state runtimeSnapshot, w http.ResponseWriter, r *htt
 		return
 	}
 
+	if isOperationalPath(r.URL.Path) {
+		if !operationsAuthorized(state, r) {
+			g.metrics.AuthFailures.Add(1)
+			recordStatus(g.metrics, http.StatusUnauthorized)
+			g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "operations", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "operations auth failed"})
+			w.Header().Set("WWW-Authenticate", `Bearer realm="gemgate-operations"`)
+			http.Error(w, "invalid operations token", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/_healthz":
+			g.writeHealth(state, w)
+		case "/_readyz":
+			g.writeReadiness(state, w)
+		case "/_metrics":
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = w.Write([]byte(g.Metrics().Prometheus()))
+		case "/_config":
+			writeJSON(w, http.StatusOK, safeConfig(state))
+		}
+		return
+	}
+
 	auth, token, ok := authenticate(state, r)
 	if !ok {
 		g.metrics.AuthFailures.Add(1)
 		recordStatus(g.metrics, http.StatusUnauthorized)
 		g.logs.Add(LogEntry{Time: start, Level: "warn", Client: "anonymous", ClientIP: clientIP, Method: r.Method, Path: r.URL.Path, Status: http.StatusUnauthorized, Duration: time.Since(start), RequestID: reqID, Message: "auth failed"})
 		http.Error(w, "invalid proxy token", http.StatusUnauthorized)
-		return
-	}
-
-	if r.URL.Path == "/_healthz" {
-		g.writeHealth(state, w)
-		return
-	}
-	if r.URL.Path == "/_readyz" {
-		g.writeReadiness(state, w)
-		return
-	}
-	if r.URL.Path == "/_metrics" {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = w.Write([]byte(g.Metrics().Prometheus()))
-		return
-	}
-	if r.URL.Path == "/_config" {
-		writeJSON(w, http.StatusOK, safeConfig(state))
 		return
 	}
 

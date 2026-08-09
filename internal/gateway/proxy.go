@@ -128,12 +128,7 @@ func prepareBody(state runtimeSnapshot, r *http.Request) (io.Reader, int64, erro
 }
 
 func authenticate(state runtimeSnapshot, r *http.Request) (clientAuth, string, bool) {
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	parts := strings.SplitN(auth, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return clientAuth{}, "", false
-	}
-	token := strings.TrimSpace(parts[1])
+	token := bearerToken(r)
 	if token == "" {
 		return clientAuth{}, "", false
 	}
@@ -173,6 +168,9 @@ func safeConfig(state runtimeSnapshot) map[string]any {
 				"allow_credentials": state.cfg.Config.Server.CORS.AllowCredentials,
 				"max_age":           state.cfg.Config.Server.CORS.MaxAge,
 			},
+		},
+		"operations": map[string]any{
+			"dedicated_auth": state.operationsToken != "",
 		},
 		"rate_limit": map[string]any{
 			"backend":   state.cfg.Config.RateLimit.Backend,

@@ -30,6 +30,7 @@ type Config struct {
 	Upstream        UpstreamConfig   `yaml:"upstream,omitempty"` // legacy single-provider config
 	Providers       []ProviderConfig `yaml:"providers,omitempty"`
 	DefaultProvider string           `yaml:"default_provider,omitempty"`
+	Operations      OperationsConfig `yaml:"operations,omitempty"`
 	Clients         []ClientConfig   `yaml:"clients"`
 	RateLimit       RateLimitConfig  `yaml:"rate_limit,omitempty"`
 	Logging         LoggingConfig    `yaml:"logging"`
@@ -69,6 +70,11 @@ type CircuitBreakerRuntime struct {
 	Enabled          bool
 	FailureThreshold int
 	OpenFor          time.Duration
+}
+
+type OperationsConfig struct {
+	Token     string `yaml:"token,omitempty"`
+	TokenFile string `yaml:"token_file,omitempty"`
 }
 
 type RateLimitConfig struct {
@@ -260,6 +266,9 @@ func applyDefaults(cfg *Config) {
 		cfg.Logging.Recent = 300
 	}
 
+	cfg.Operations.Token = strings.TrimSpace(cfg.Operations.Token)
+	cfg.Operations.TokenFile = strings.TrimSpace(cfg.Operations.TokenFile)
+
 	cfg.RateLimit.Backend = strings.ToLower(strings.TrimSpace(cfg.RateLimit.Backend))
 	if cfg.RateLimit.Backend == "" {
 		cfg.RateLimit.Backend = DefaultRateLimitBackend
@@ -356,6 +365,16 @@ func resolveSecretFiles(cfg *Config, baseDir string) error {
 			return fmt.Errorf("client %q token_file: %w", c.Name, err)
 		}
 		c.Token = secret
+	}
+	if cfg.Operations.Token != "" && cfg.Operations.TokenFile != "" {
+		return errors.New("operations.token and token_file are mutually exclusive")
+	}
+	if cfg.Operations.TokenFile != "" {
+		secret, err := readSecretFile(baseDir, cfg.Operations.TokenFile)
+		if err != nil {
+			return fmt.Errorf("operations.token_file: %w", err)
+		}
+		cfg.Operations.Token = secret
 	}
 	redisCfg := &cfg.RateLimit.Redis
 	if redisCfg.URL != "" && redisCfg.URLFile != "" {
@@ -479,6 +498,11 @@ func validate(rt Runtime) error {
 	}
 	if activeClients == 0 {
 		return errors.New("no enabled clients; add at least one clients[].token or token_file")
+	}
+	if cfg.Operations.Token != "" {
+		if _, duplicated := seenTokens[cfg.Operations.Token]; duplicated {
+			return errors.New("operations token must be distinct from every enabled client token")
+		}
 	}
 	if rt.RequestBodyLimit < 0 {
 		return errors.New("request_body_limit must not be negative")

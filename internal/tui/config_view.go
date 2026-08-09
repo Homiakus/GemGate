@@ -18,12 +18,17 @@ func (m Model) configView() string {
 	if rateLimit == "redis" {
 		rateLimit = fmt.Sprintf("redis (fail_open=%t)", m.cfg.RateLimitFailOpen)
 	}
+	operationsAuth := "legacy client-token fallback"
+	if m.cfg.DedicatedOperationsAuth {
+		operationsAuth = "dedicated token"
+	}
 	lines := []string{
 		subtitleStyle.Render("Runtime config"), "",
 		labelStyle.Render("listen:") + "              " + textStyle.Render(m.cfg.Listen),
 		labelStyle.Render("default_provider:") + "    " + valueStyle.Render(m.cfg.DefaultProvider),
 		labelStyle.Render("providers:") + "           " + textStyle.Render(fmt.Sprintf("%d", len(m.cfg.Providers))),
 		labelStyle.Render("public_health:") + "       " + textStyle.Render(fmt.Sprintf("%t", m.cfg.PublicHealth)),
+		labelStyle.Render("operations_auth:") + "     " + textStyle.Render(operationsAuth),
 		labelStyle.Render("request_body_limit:") + "  " + textStyle.Render(m.cfg.RequestBodyLimit),
 		labelStyle.Render("rate_limit:") + "          " + textStyle.Render(rateLimit),
 		labelStyle.Render("cors:") + "                " + textStyle.Render(origins),
@@ -46,7 +51,7 @@ func (m Model) configView() string {
 	}
 	lines = append(lines,
 		"", subtitleStyle.Render("Security posture"), "",
-		textStyle.Render("• clients authenticate only with GemGate bearer tokens"),
+		textStyle.Render("• application and operations bearer tokens can be separated into independent trust domains"),
 		textStyle.Render("• provider credentials are sanitized from inbound requests and injected server-side"),
 		textStyle.Render("• Redis rate-limit keys use token hashes; Redis credentials are never shown here"),
 		textStyle.Render("• config, secrets and provider circuit policies are swapped atomically on hot reload"),
