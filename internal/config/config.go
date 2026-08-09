@@ -33,6 +33,7 @@ type Config struct {
 	Operations      OperationsConfig `yaml:"operations,omitempty"`
 	Clients         []ClientConfig   `yaml:"clients"`
 	RateLimit       RateLimitConfig  `yaml:"rate_limit,omitempty"`
+	Telemetry       TelemetryConfig  `yaml:"telemetry,omitempty"`
 	Logging         LoggingConfig    `yaml:"logging"`
 }
 
