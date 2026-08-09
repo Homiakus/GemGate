@@ -16,6 +16,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	DefaultCircuitFailureThreshold = 5
+	DefaultCircuitOpenFor          = 30 * time.Second
+)
+
 type Config struct {
 	Server          ServerConfig     `yaml:"server"`
 	Upstream        UpstreamConfig   `yaml:"upstream,omitempty"` // legacy single-provider config
@@ -48,6 +53,22 @@ func (c CORSConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
 }
 
+type CircuitBreakerConfig struct {
+	Enabled          *bool  `yaml:"enabled,omitempty"`
+	FailureThreshold int    `yaml:"failure_threshold,omitempty"`
+	OpenFor          string `yaml:"open_for,omitempty"`
+}
+
+func (c CircuitBreakerConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+type CircuitBreakerRuntime struct {
+	Enabled          bool
+	FailureThreshold int
+	OpenFor          time.Duration
+}
+
 type UpstreamConfig struct {
 	BaseURL    string `yaml:"base_url"`
 	APIKey     string `yaml:"api_key"`
@@ -56,13 +77,14 @@ type UpstreamConfig struct {
 }
 
 type ProviderConfig struct {
-	Name       string            `yaml:"name"`
-	Type       string            `yaml:"type"`
-	BaseURL    string            `yaml:"base_url,omitempty"`
-	APIKey     string            `yaml:"api_key,omitempty"`
-	APIKeyFile string            `yaml:"api_key_file,omitempty"`
-	Timeout    string            `yaml:"timeout,omitempty"`
-	Headers    map[string]string `yaml:"headers,omitempty"`
+	Name           string               `yaml:"name"`
+	Type           string               `yaml:"type"`
+	BaseURL        string               `yaml:"base_url,omitempty"`
+	APIKey         string               `yaml:"api_key,omitempty"`
+	APIKeyFile     string               `yaml:"api_key_file,omitempty"`
+	Timeout        string               `yaml:"timeout,omitempty"`
+	Headers        map[string]string    `yaml:"headers,omitempty"`
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker,omitempty"`
 }
 
 type ClientConfig struct {
@@ -86,6 +108,7 @@ type Runtime struct {
 	IdleTimeout      time.Duration
 	UpstreamTimeout  time.Duration // default provider timeout, kept for compatibility
 	ProviderTimeouts map[string]time.Duration
+	ProviderCircuits map[string]CircuitBreakerRuntime
 	RequestBodyLimit int64
 	CORSMaxAge       time.Duration
 }
@@ -118,7 +141,11 @@ func Load(path string) (Runtime, error) {
 	}
 	syncLegacyUpstream(&cfg)
 
-	rt := Runtime{Config: cfg, ProviderTimeouts: make(map[string]time.Duration, len(cfg.Providers))}
+	rt := Runtime{
+		Config:           cfg,
+		ProviderTimeouts: make(map[string]time.Duration, len(cfg.Providers)),
+		ProviderCircuits: make(map[string]CircuitBreakerRuntime, len(cfg.Providers)),
+	}
 	if rt.ReadTimeout, err = parseDuration(cfg.Server.ReadTimeout); err != nil {
 		return Runtime{}, fmt.Errorf("server.read_timeout: %w", err)
 	}
@@ -142,6 +169,16 @@ func Load(path string) (Runtime, error) {
 		rt.ProviderTimeouts[p.Name] = d
 		if p.Name == cfg.DefaultProvider {
 			rt.UpstreamTimeout = d
+		}
+
+		openFor, parseErr := parseDuration(p.CircuitBreaker.OpenFor)
+		if parseErr != nil {
+			return Runtime{}, fmt.Errorf("provider %q circuit_breaker.open_for: %w", p.Name, parseErr)
+		}
+		rt.ProviderCircuits[p.Name] = CircuitBreakerRuntime{
+			Enabled:          p.CircuitBreaker.IsEnabled(),
+			FailureThreshold: p.CircuitBreaker.FailureThreshold,
+			OpenFor:          openFor,
 		}
 	}
 
@@ -234,6 +271,16 @@ func applyDefaults(cfg *Config) {
 		p.BaseURL = strings.TrimRight(strings.TrimSpace(p.BaseURL), "/")
 		if p.Timeout == "" {
 			p.Timeout = "0s"
+		}
+		if p.CircuitBreaker.Enabled == nil {
+			enabled := true
+			p.CircuitBreaker.Enabled = &enabled
+		}
+		if p.CircuitBreaker.FailureThreshold == 0 {
+			p.CircuitBreaker.FailureThreshold = DefaultCircuitFailureThreshold
+		}
+		if p.CircuitBreaker.OpenFor == "" {
+			p.CircuitBreaker.OpenFor = DefaultCircuitOpenFor.String()
 		}
 	}
 	for i := range cfg.Clients {
@@ -347,6 +394,19 @@ func validate(rt Runtime) error {
 		for key := range p.Headers {
 			if strings.TrimSpace(key) == "" {
 				return fmt.Errorf("provider %q has empty header name", p.Name)
+			}
+		}
+
+		policy, ok := rt.ProviderCircuits[p.Name]
+		if !ok {
+			policy = CircuitBreakerRuntime{Enabled: true, FailureThreshold: DefaultCircuitFailureThreshold, OpenFor: DefaultCircuitOpenFor}
+		}
+		if policy.Enabled {
+			if policy.FailureThreshold <= 0 {
+				return fmt.Errorf("provider %q circuit_breaker.failure_threshold must be positive", p.Name)
+			}
+			if policy.OpenFor <= 0 {
+				return fmt.Errorf("provider %q circuit_breaker.open_for must be positive", p.Name)
 			}
 		}
 	}
