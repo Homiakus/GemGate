@@ -192,7 +192,7 @@ rate_limit:
   backend: redis
   redis:
     url_file: redis-url
-    key_prefix: test:
+    key_prefix: "test:"
     timeout: 750ms
 upstream:
   api_key: secret
