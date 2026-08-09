@@ -51,8 +51,9 @@ func (t *providerMetricsTransport) RoundTrip(req *http.Request) (*http.Response,
 
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		t.metrics.providerFinish(t.provider, 0, time.Since(start), true)
-		t.breaker.finish(permit, true, time.Now())
+		providerFailure := !downstreamRequestAborted(req.Context())
+		t.metrics.providerFinish(t.provider, 0, time.Since(start), providerFailure)
+		t.breaker.finish(permit, providerFailure, time.Now())
 		return nil, err
 	}
 	if resp.Body == nil {
