@@ -6,16 +6,14 @@ import (
 
 	"gemgate/internal/gateway"
 
-	"charm.land/lipgloss/v2"
+	"charm.land/bubbles/v2/table"
 )
 
-func (m Model) providersView() string {
-	w := m.contentWidth()
+func (m *Model) updateProviderRows() {
+	rows := make([]table.Row, 0, len(m.cfg.Providers))
 	byName := providerMetricsByName(m.metrics.Providers)
 	circuits := providerCircuitsByName(m.metrics.Circuits)
-	header := labelStyle.Render(fmt.Sprintf("%-17s %-15s %-9s %-10s %-10s %-7s %-8s %-8s %-10s",
-		"Provider", "Type", "Role", "Health", "Circuit", "Req", "Error", "Flight", "Avg"))
-	lines := []string{header}
+	width := m.contentWidth()
 
 	for _, p := range m.cfg.Providers {
 		pm := byName[p.Name]
@@ -24,36 +22,128 @@ func (m Model) providersView() string {
 		if p.Name == m.cfg.DefaultProvider {
 			role = "default"
 		}
-		errorRate := providerErrorRate(pm)
-		lines = append(lines, fmt.Sprintf("%-17s %-15s %-9s %-10s %-10s %-7d %-8s %-8d %-10s",
-			textStyle.Render(truncate(p.Name, 16)),
-			mutedStyle.Render(truncate(p.Type, 14)),
-			providerRoleText(role),
-			providerHealthText(pm.Health),
-			providerCircuitText(circuit.State),
-			pm.Requests,
-			providerErrorText(errorRate, pm),
-			pm.InFlight,
+		rows = append(rows, providerRow(p.Name, p.Type, role, pm, circuit, width))
+	}
+	m.providerTable.SetRows(rows)
+}
+
+func providerRow(name, providerType, role string, pm gateway.ProviderMetricsSnapshot, circuit gateway.CircuitSnapshot, width int) table.Row {
+	health := providerHealthCell(pm.Health)
+	circuitState := safeText(circuit.State, "closed")
+	errRate := providerErrorRate(pm)
+
+	switch {
+	case width >= 112:
+		return table.Row{
+			name, role, health, circuitState,
+			fmt.Sprintf("%d", pm.Requests),
+			errRate,
+			fmt.Sprintf("%d", pm.InFlight),
 			formatDuration(pm.AverageDuration),
-		))
+			providerType,
+		}
+	case width >= 82:
+		return table.Row{
+			name, role, health, circuitState,
+			fmt.Sprintf("%d", pm.Requests),
+			errRate,
+			formatDuration(pm.AverageDuration),
+		}
+	default:
+		return table.Row{name, health, circuitState, fmt.Sprintf("%d", pm.Requests)}
 	}
+}
+
+func (m Model) providersView() string {
+	w := m.contentWidth()
+	parts := []string{
+		sectionRule(fmt.Sprintf("Providers  %d configured", len(m.cfg.Providers)), w),
+		mutedStyle.Render("Passive health + full-stream circuit accounting. No automatic generation retries."),
+		"",
+		m.providerTable.View(),
+		"",
+		sectionRule("Selected provider", w),
+		m.providerDetailView(),
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) providerDetailView() string {
 	if len(m.cfg.Providers) == 0 {
-		lines = append(lines, mutedStyle.Render("No configured providers."))
+		return mutedStyle.Render("No configured providers.")
+	}
+	idx := m.providerTable.Cursor()
+	if idx < 0 || idx >= len(m.cfg.Providers) {
+		idx = 0
+	}
+	p := m.cfg.Providers[idx]
+	pm := providerMetricsByName(m.metrics.Providers)[p.Name]
+	circuit := providerCircuitsByName(m.metrics.Circuits)[p.Name]
+
+	role := "named"
+	if p.Name == m.cfg.DefaultProvider {
+		role = "default"
+	}
+	circuitPolicy := "disabled"
+	if p.CircuitEnabled {
+		circuitPolicy = fmt.Sprintf("threshold=%d, open=%s", p.CircuitFailureThreshold, p.CircuitOpenFor)
 	}
 
-	baseURL := localBaseURL(m.cfg.Listen)
-	quick := hintBoxStyle.Width(min(w-8, 104)).Render(lipgloss.JoinVertical(lipgloss.Left,
-		subtitleStyle.Render("Routing & resilience"),
-		codeStyle.Render("Default: "+baseURL+"/<provider-path>"),
-		codeStyle.Render("Named:   "+baseURL+"/providers/{name}/<provider-path>"),
-		mutedStyle.Render("Circuit policy is per provider and hot-reloadable; defaults are threshold=5, open=30s. No automatic retries."),
-	))
+	line1 := fmt.Sprintf("%s  %s  role=%s",
+		valueStyle.Render(p.Name),
+		mutedStyle.Render(p.Type),
+		role,
+	)
+	line2 := fmt.Sprintf("health=%s  circuit=%s  requests=%d  error=%s  in-flight=%d  avg=%s",
+		providerHealthText(pm.Health),
+		providerCircuitText(circuit.State),
+		pm.Requests,
+		providerErrorText(providerErrorRate(pm), pm),
+		pm.InFlight,
+		formatDuration(pm.AverageDuration),
+	)
+	line3 := mutedStyle.Render("base: " + truncate(p.BaseURL, max(24, m.contentWidth()-8)))
+	line4 := mutedStyle.Render("circuit policy: " + circuitPolicy)
 
-	return boxStyle.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left,
-		subtitleStyle.Render("Providers"),
-		mutedStyle.Render("Health and circuit state are passive and measured around the full streamed response lifecycle."),
-		"", strings.Join(lines, "\n"), "", quick,
-	))
+	if m.contentWidth() >= 82 {
+		baseURL := localBaseURL(m.cfg.Listen)
+		line4 += "\n" + mutedStyle.Render("route: "+baseURL+"/providers/"+p.Name+"/...")
+	}
+	return detailBgStyle.Render(strings.Join([]string{line1, line2, line3, line4}, "\n"))
+}
+
+func providerColumns(width int) []table.Column {
+	switch {
+	case width >= 112:
+		return []table.Column{
+			{Title: "PROVIDER", Width: 18},
+			{Title: "ROLE", Width: 9},
+			{Title: "HEALTH", Width: 9},
+			{Title: "CIRCUIT", Width: 11},
+			{Title: "REQ", Width: 7},
+			{Title: "ERROR", Width: 8},
+			{Title: "FLIGHT", Width: 8},
+			{Title: "AVG", Width: 10},
+			{Title: "TYPE", Width: max(14, width-98)},
+		}
+	case width >= 82:
+		return []table.Column{
+			{Title: "PROVIDER", Width: 18},
+			{Title: "ROLE", Width: 9},
+			{Title: "HEALTH", Width: 9},
+			{Title: "CIRCUIT", Width: 11},
+			{Title: "REQ", Width: 7},
+			{Title: "ERROR", Width: 8},
+			{Title: "AVG", Width: max(10, width-72)},
+		}
+	default:
+		return []table.Column{
+			{Title: "PROVIDER", Width: max(16, width-31)},
+			{Title: "HEALTH", Width: 9},
+			{Title: "CIRCUIT", Width: 11},
+			{Title: "REQ", Width: 7},
+		}
+	}
 }
 
 func providerMetricsByName(items []gateway.ProviderMetricsSnapshot) map[string]gateway.ProviderMetricsSnapshot {
@@ -98,36 +188,42 @@ func providerHealthSummary(items []gateway.ProviderMetricsSnapshot) string {
 	return strings.Join(parts, "   ")
 }
 
-func providerRoleText(role string) string {
-	if role == "default" {
-		return valueStyle.Render(role)
+func providerHealthCell(health string) string {
+	switch health {
+	case "healthy":
+		return "OK"
+	case "warning":
+		return "WARN"
+	case "degraded":
+		return "FAIL"
+	default:
+		return "?"
 	}
-	return mutedStyle.Render(role)
 }
 
 func providerHealthText(health string) string {
 	switch health {
 	case "healthy":
-		return okStyle.Render(health)
+		return okStyle.Render("OK healthy")
 	case "warning":
-		return warnStyle.Render(health)
+		return warnStyle.Render("! warning")
 	case "degraded":
-		return badStyle.Render(health)
+		return badStyle.Render("! degraded")
 	default:
-		return mutedStyle.Render("unknown")
+		return mutedStyle.Render("? unknown")
 	}
 }
 
 func providerCircuitText(state string) string {
 	switch state {
 	case "closed":
-		return okStyle.Render(state)
+		return okStyle.Render("closed")
 	case "half_open":
 		return warnStyle.Render("half-open")
 	case "open":
-		return badStyle.Render(state)
+		return badStyle.Render("open")
 	case "disabled":
-		return mutedStyle.Render(state)
+		return mutedStyle.Render("disabled")
 	default:
 		return mutedStyle.Render("closed")
 	}
@@ -142,7 +238,10 @@ func providerErrorRate(p gateway.ProviderMetricsSnapshot) string {
 }
 
 func providerErrorText(rate string, p gateway.ProviderMetricsSnapshot) string {
-	if p.Requests4xx+p.Requests5xx+p.TransportErrors > 0 {
+	if p.Requests5xx+p.TransportErrors > 0 {
+		return badStyle.Render(rate)
+	}
+	if p.Requests4xx > 0 {
 		return warnStyle.Render(rate)
 	}
 	return textStyle.Render(rate)

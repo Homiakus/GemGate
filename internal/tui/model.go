@@ -7,9 +7,9 @@ import (
 
 	"gemgate/internal/gateway"
 
-	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -17,15 +17,25 @@ import (
 type tab int
 
 const (
-	tabDashboard tab = iota
-	tabLogs
-	tabClients
+	tabOverview tab = iota
+	tabRequests
 	tabProviders
+	tabClients
 	tabConfig
-	tabHelp
 )
 
-var tabNames = []string{"Overview", "Logs", "Clients", "Providers", "Config", "Help"}
+type sectionDef struct {
+	Name        string
+	Description string
+}
+
+var sections = []sectionDef{
+	{Name: "Overview", Description: "health and traffic"},
+	{Name: "Requests", Description: "request stream and diagnostics"},
+	{Name: "Providers", Description: "upstreams and circuit state"},
+	{Name: "Clients", Description: "consumer usage and limits"},
+	{Name: "Config", Description: "effective runtime posture"},
+}
 
 type logFilter int
 
@@ -47,82 +57,63 @@ type Model struct {
 	active      tab
 	filter      logFilter
 	paused      bool
+	showHelp    bool
 	width       int
 	height      int
+	layout      Layout
 	lastRefresh time.Time
 
-	visibleLogs []gateway.LogEntry
-	logTable    table.Model
-	help        help.Model
-	keys        keyMap
-}
+	visibleLogs   []gateway.LogEntry
+	logTable      table.Model
+	providerTable table.Model
+	clientTable   table.Model
 
-type keyMap struct {
-	Quit       key.Binding
-	Refresh    key.Binding
-	Pause      key.Binding
-	NextTab    key.Binding
-	PrevTab    key.Binding
-	Jump       key.Binding
-	Help       key.Binding
-	FilterAll  key.Binding
-	FilterWarn key.Binding
-	FilterErr  key.Binding
-	FilterAuth key.Binding
-}
-
-func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.NextTab, k.Refresh, k.Pause, k.Help, k.Quit}
-}
-
-func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.NextTab, k.PrevTab, k.Jump, k.Refresh},
-		{k.Pause, k.FilterAll, k.FilterWarn, k.FilterErr, k.FilterAuth},
-		{k.Help, k.Quit},
-	}
+	configViewport viewport.Model
+	helpViewport   viewport.Model
+	keys           keyMap
 }
 
 func New(gw *gateway.Gateway) Model {
-	keys := keyMap{
-		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		Refresh:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Pause:      key.NewBinding(key.WithKeys(" ", "p"), key.WithHelp("space/p", "pause")),
-		NextTab:    key.NewBinding(key.WithKeys("tab", "right", "l"), key.WithHelp("tab/right", "next")),
-		PrevTab:    key.NewBinding(key.WithKeys("shift+tab", "left", "h"), key.WithHelp("shift+tab/left", "prev")),
-		Jump:       key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6"), key.WithHelp("1-6", "menu")),
-		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		FilterAll:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
-		FilterWarn: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "warn")),
-		FilterErr:  key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "errors")),
-		FilterAuth: key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "auth")),
+	m := Model{
+		gw:             gw,
+		active:         tabOverview,
+		width:          100,
+		height:         30,
+		logTable:       newTable(),
+		providerTable:  newTable(),
+		clientTable:    newTable(),
+		configViewport: viewport.New(),
+		helpViewport:   viewport.New(),
+		keys:           newKeyMap(),
 	}
+	m.configViewport.SoftWrap = true
+	m.helpViewport.SoftWrap = true
+	m.refresh()
+	m.resize()
+	return m
+}
 
+func newTable() table.Model {
 	styles := table.DefaultStyles()
 	styles.Header = styles.Header.
 		Bold(true).
-		Foreground(lipgloss.Color("#c4b5fd")).
-		Background(lipgloss.Color("#0f172a")).
+		Foreground(mutedColor).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
-		BorderForeground(lipgloss.Color("#334155"))
+		BorderForeground(borderColor)
 	styles.Selected = styles.Selected.
 		Bold(true).
-		Foreground(lipgloss.Color("#f8fafc")).
-		Background(lipgloss.Color("#4c1d95"))
-	styles.Cell = styles.Cell.Foreground(lipgloss.Color("#dbeafe"))
+		Foreground(foregroundColor).
+		Background(surfaceColor)
+	styles.Cell = styles.Cell.Foreground(foregroundColor)
 
-	logTable := table.New(
-		table.WithColumns(defaultLogColumns(96)),
+	return table.New(
+		table.WithColumns(nil),
 		table.WithRows(nil),
 		table.WithFocused(true),
-		table.WithHeight(16),
+		table.WithHeight(10),
 		table.WithStyles(styles),
 	)
-
-	m := Model{gw: gw, active: tabDashboard, logTable: logTable, help: help.New(), keys: keys}
-	m.refresh()
-	return m
 }
 
 func (m Model) Init() tea.Cmd { return tick() }
@@ -134,10 +125,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resize()
 		return m, nil
+
 	case tea.KeyPressMsg:
-		switch {
-		case key.Matches(msg, m.keys.Quit):
+		if key.Matches(msg, m.keys.Quit) {
 			return m, tea.Quit
+		}
+
+		if m.showHelp {
+			switch {
+			case key.Matches(msg, m.keys.Help), key.Matches(msg, m.keys.Back):
+				m.showHelp = false
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.helpViewport, cmd = m.helpViewport.Update(msg)
+			return m, cmd
+		}
+
+		switch {
+		case key.Matches(msg, m.keys.Help):
+			m.showHelp = true
+			m.updateHelpViewport()
+			return m, nil
 		case key.Matches(msg, m.keys.Refresh):
 			m.refresh()
 			return m, nil
@@ -145,31 +154,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paused = !m.paused
 			return m, nil
 		case key.Matches(msg, m.keys.NextTab):
-			m.active = (m.active + 1) % tab(len(tabNames))
+			m.setActive((m.active + 1) % tab(len(sections)))
 			return m, nil
 		case key.Matches(msg, m.keys.PrevTab):
-			m.active = (m.active - 1 + tab(len(tabNames))) % tab(len(tabNames))
+			m.setActive((m.active - 1 + tab(len(sections))) % tab(len(sections)))
 			return m, nil
-		case key.Matches(msg, m.keys.Help):
-			m.help.ShowAll = !m.help.ShowAll
-			return m, nil
-		case key.Matches(msg, m.keys.FilterAll):
-			m.setFilter(filterAll)
-			return m, nil
-		case key.Matches(msg, m.keys.FilterWarn):
-			m.setFilter(filterWarnings)
-			return m, nil
-		case key.Matches(msg, m.keys.FilterErr):
-			m.setFilter(filterErrors)
-			return m, nil
-		case key.Matches(msg, m.keys.FilterAuth):
-			m.setFilter(filterAuth)
+		case key.Matches(msg, m.keys.Back):
+			if m.active != tabOverview {
+				m.setActive(tabOverview)
+			}
 			return m, nil
 		}
+
 		if idx := menuIndex(msg.String()); idx >= 0 {
-			m.active = tab(idx)
+			m.setActive(tab(idx))
 			return m, nil
 		}
+
+		if m.active == tabRequests {
+			switch {
+			case key.Matches(msg, m.keys.FilterAll):
+				m.setFilter(filterAll)
+				return m, nil
+			case key.Matches(msg, m.keys.FilterWarn):
+				m.setFilter(filterWarnings)
+				return m, nil
+			case key.Matches(msg, m.keys.FilterErr):
+				m.setFilter(filterErrors)
+				return m, nil
+			case key.Matches(msg, m.keys.FilterAuth):
+				m.setFilter(filterAuth)
+				return m, nil
+			}
+		}
+
 	case tickMsg:
 		if !m.paused {
 			m.refresh()
@@ -177,16 +195,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 	}
 
-	if m.active == tabLogs {
-		var cmd tea.Cmd
+	var cmd tea.Cmd
+	switch m.active {
+	case tabRequests:
 		m.logTable, cmd = m.logTable.Update(msg)
-		return m, cmd
+	case tabProviders:
+		m.providerTable, cmd = m.providerTable.Update(msg)
+	case tabClients:
+		m.clientTable, cmd = m.clientTable.Update(msg)
+	case tabConfig:
+		m.configViewport, cmd = m.configViewport.Update(msg)
 	}
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) View() tea.View {
-	content := lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.tabsView(), m.bodyView(), m.footerView())
+	var content string
+	if m.layout.IsTiny() {
+		content = m.tinyView()
+	} else {
+		header := m.headerView()
+		footer := m.footerView()
+		body := m.workspaceView()
+		if m.layout.IsWide() {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, m.navigationView(), strings.Repeat(" ", m.layout.Gap), body)
+			content = lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+		} else {
+			content = lipgloss.JoinVertical(lipgloss.Left, header, m.sectionBarView(), body, footer)
+		}
+	}
+
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
@@ -198,6 +236,23 @@ func (m *Model) refresh() {
 	m.logs = m.gw.Logs()
 	m.lastRefresh = time.Now()
 	m.updateLogRows()
+	m.updateProviderRows()
+	m.updateClientRows()
+	m.updateConfigViewport()
+	if m.showHelp {
+		m.updateHelpViewport()
+	}
+}
+
+func (m *Model) setActive(next tab) {
+	if next < 0 || int(next) >= len(sections) {
+		return
+	}
+	m.active = next
+	m.showHelp = false
+	if next == tabConfig {
+		m.updateConfigViewport()
+	}
 }
 
 func (m *Model) setFilter(f logFilter) {
@@ -219,83 +274,183 @@ func (m Model) filterLog(e gateway.LogEntry) bool {
 }
 
 func (m *Model) resize() {
-	w := m.contentWidth()
-	h := m.height - 13
-	if h < 8 {
-		h = 8
+	m.layout = calculateLayout(m.width, m.height)
+	if m.layout.IsTiny() {
+		return
 	}
-	m.logTable.SetColumns(defaultLogColumns(w))
-	m.logTable.SetWidth(w)
-	m.logTable.SetHeight(h)
+
+	workspaceWidth := m.layout.WorkspaceWidth
+	contentWidth := max(24, workspaceWidth-4)
+	bodyHeight := max(8, m.layout.BodyHeight)
+
+	m.logTable.SetColumns(defaultLogColumns(contentWidth))
+	m.logTable.SetWidth(contentWidth)
+	m.logTable.SetHeight(max(5, bodyHeight-10))
+
+	m.providerTable.SetColumns(providerColumns(contentWidth))
+	m.providerTable.SetWidth(contentWidth)
+	m.providerTable.SetHeight(max(5, bodyHeight-11))
+
+	m.clientTable.SetColumns(clientColumns(contentWidth))
+	m.clientTable.SetWidth(contentWidth)
+	m.clientTable.SetHeight(max(5, bodyHeight-11))
+
+	m.configViewport.SetWidth(contentWidth)
+	m.configViewport.SetHeight(max(6, bodyHeight-3))
+	m.helpViewport.SetWidth(contentWidth)
+	m.helpViewport.SetHeight(max(6, bodyHeight-3))
+
+	m.updateLogRows()
+	m.updateProviderRows()
+	m.updateClientRows()
+	m.updateConfigViewport()
+	if m.showHelp {
+		m.updateHelpViewport()
+	}
 }
 
 func (m Model) contentWidth() int {
-	if m.width <= 0 {
-		return 100
+	if m.layout.WorkspaceWidth > 0 {
+		return max(24, m.layout.WorkspaceWidth-4)
 	}
-	w := m.width - 4
-	if w < 32 {
-		return 32
+	return 96
+}
+
+func (m Model) overallStatus() string {
+	if m.paused {
+		return statusPausedStyle.Render("PAUSED")
 	}
-	return w
+	if m.metrics.Requests5xx > 0 || m.metrics.UpstreamErrors > 0 || providerAttentionCount(m.metrics.Providers, m.metrics.Circuits) > 0 {
+		return statusWarnStyle.Render("! DEGRADED")
+	}
+	return statusOKStyle.Render("OK LIVE")
 }
 
 func (m Model) headerView() string {
-	status := statusOKStyle.Render(" LIVE ")
-	if m.paused {
-		status = statusPausedStyle.Render(" PAUSED ")
-	} else if m.metrics.Requests5xx > 0 || m.metrics.UpstreamErrors > 0 || providerAttentionCount(m.metrics.Providers, m.metrics.Circuits) > 0 {
-		status = statusWarnStyle.Render(" DEGRADED ")
-	}
+	section := sections[m.active]
+	left := titleStyle.Render("GemGate") + mutedStyle.Render(" / ") + textStyle.Render(section.Name)
 
-	last := "not refreshed"
+	updated := "--:--:--"
 	if !m.lastRefresh.IsZero() {
-		last = m.lastRefresh.Format("15:04:05")
+		updated = m.lastRefresh.Format("15:04:05")
 	}
-
-	parts := []string{
-		titleStyle.Render(" GemGate "), " ", status, " ",
-		pillStyle.Render("listen " + m.gw.Addr()), " ",
-		pillStyle.Render(fmt.Sprintf("%d clients", enabledClientCount(m.cfg))), " ",
-		pillStyle.Render(fmt.Sprintf("%d providers", len(m.cfg.Providers))), "  ",
-		mutedStyle.Render("updated " + last),
+	right := m.overallStatus()
+	if m.layout.Width >= 72 {
+		right = fmt.Sprintf("%s  req %d  in %d  %s", right, m.metrics.Requests, m.metrics.InFlight, mutedStyle.Render(updated))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+	if m.layout.Width >= 110 {
+		right = fmt.Sprintf("%s  %s", mutedStyle.Render(m.cfg.Listen), right)
+	}
+	return headerStyle.Width(max(1, m.layout.Width-2)).Render(padBetween(left, right, max(1, m.layout.Width-4)))
 }
 
-func (m Model) tabsView() string {
-	parts := make([]string, 0, len(tabNames))
-	for i, name := range tabNames {
-		label := fmt.Sprintf("%d %s", i+1, name)
-		style := inactiveTabStyle
+func (m Model) navigationView() string {
+	lines := []string{subtitleStyle.Render("Sections"), ""}
+	for i, section := range sections {
+		prefix := "  "
+		style := navItemStyle
 		if tab(i) == m.active {
-			style = activeTabStyle
+			prefix = "> "
+			style = navActiveStyle
 		}
-		parts = append(parts, style.Render(label))
+		lines = append(lines, style.Render(fmt.Sprintf("%s%d  %s", prefix, i+1, section.Name)))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	lines = append(lines,
+		"",
+		sectionRuleStyle.Render(strings.Repeat("─", max(1, m.layout.NavWidth-4))),
+		"",
+		mutedStyle.Render("listen"),
+		textStyle.Render(truncate(m.cfg.Listen, max(10, m.layout.NavWidth-4))),
+		"",
+		mutedStyle.Render(fmt.Sprintf("%d providers", len(m.cfg.Providers))),
+		mutedStyle.Render(fmt.Sprintf("%d clients", enabledClientCount(m.cfg))),
+	)
+	return navigationStyle.Width(max(12, m.layout.NavWidth-3)).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) sectionBarView() string {
+	if m.layout.IsCompact() {
+		current := fmt.Sprintf("%d/%d %s", int(m.active)+1, len(sections), sections[m.active].Name)
+		hint := mutedStyle.Render("[ ] / tab sections")
+		return headerStyle.Width(max(1, m.layout.Width-2)).Render(padBetween(navActiveStyle.Render(current), hint, max(1, m.layout.Width-4)))
+	}
+
+	parts := make([]string, 0, len(sections))
+	for i, section := range sections {
+		label := fmt.Sprintf("%d %s", i+1, section.Name)
+		if tab(i) == m.active {
+			parts = append(parts, activeTabStyle.Render(label))
+		} else {
+			parts = append(parts, inactiveTabStyle.Render(label))
+		}
+	}
+	return headerStyle.Render(strings.Join(parts, "   "))
+}
+
+func (m Model) workspaceView() string {
+	var body string
+	if m.showHelp {
+		body = m.helpView()
+	} else {
+		body = m.bodyView()
+	}
+	return workspaceStyle.Width(max(1, m.layout.WorkspaceWidth-2)).Render(body)
 }
 
 func (m Model) bodyView() string {
 	switch m.active {
-	case tabDashboard:
+	case tabOverview:
 		return m.dashboardView()
-	case tabLogs:
+	case tabRequests:
 		return m.logsView()
-	case tabClients:
-		return m.clientsView()
 	case tabProviders:
 		return m.providersView()
+	case tabClients:
+		return m.clientsView()
 	case tabConfig:
 		return m.configView()
-	case tabHelp:
-		return m.helpView()
 	default:
 		return ""
 	}
 }
 
-func (m Model) footerView() string { return mutedStyle.Render(m.help.View(m.keys)) }
+func (m Model) footerView() string {
+	width := max(1, m.layout.Width-2)
+	if m.showHelp {
+		return footerStyle.Width(width).Render("↑↓ scroll   esc close   q quit")
+	}
+
+	context := ""
+	switch m.active {
+	case tabRequests:
+		context = "↑↓ select   a/w/e/u filter"
+	case tabProviders, tabClients:
+		context = "↑↓ select"
+	case tabConfig:
+		context = "↑↓/pgup/pgdn scroll"
+	default:
+		context = "r refresh"
+	}
+
+	global := "? help   q quit"
+	if m.layout.Width >= 76 {
+		global = "tab/[ ] section   r refresh   ? help   q quit"
+	}
+	return footerStyle.Width(width).Render(padBetween(context, global, max(1, width-2)))
+}
+
+func (m Model) tinyView() string {
+	lines := []string{
+		titleStyle.Render("GemGate"),
+		"",
+		warnStyle.Render("Terminal too small for the operator UI."),
+		fmt.Sprintf("Minimum: %dx%d", minTerminalWidth, minTerminalHeight),
+		fmt.Sprintf("Current: %dx%d", m.width, m.height),
+		"",
+		mutedStyle.Render("Resize the terminal or press q to quit."),
+	}
+	return strings.Join(lines, "\n")
+}
 
 func tick() tea.Cmd {
 	return func() tea.Msg {

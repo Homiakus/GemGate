@@ -10,68 +10,12 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func metricCard(label, value, note string, width int) string {
-	return cardStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, mutedStyle.Render(label), valueStyle.Render(value), dimStyle.Render(note)))
-}
-
-func cardGrid(cards []string, cols int) string {
-	rows := make([]string, 0, (len(cards)+cols-1)/cols)
-	for i := 0; i < len(cards); i += cols {
-		end := i + cols
-		if end > len(cards) {
-			end = len(cards)
-		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, appendSpacing(cards[i:end])...))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, rows...)
-}
-
-func appendSpacing(items []string) []string {
-	if len(items) <= 1 {
-		return items
-	}
-	out := make([]string, 0, len(items)*2-1)
-	for i, item := range items {
-		if i > 0 {
-			out = append(out, " ")
-		}
-		out = append(out, item)
-	}
-	return out
-}
-
 func filterPill(k, label string, selected bool) string {
 	text := k + " " + label
 	if selected {
-		return selectedPillStyle.Render(text)
+		return selectedPillStyle.Render("[" + text + "]")
 	}
-	return pillStyle.Render(text)
-}
-
-func responsiveColumns(width int) int {
-	switch {
-	case width >= 112:
-		return 4
-	case width >= 82:
-		return 3
-	case width >= 58:
-		return 2
-	default:
-		return 1
-	}
-}
-
-func cardWidth(width, cols int) int {
-	extraPerCard := 6
-	gaps := cols - 1
-	w := (width - gaps - extraPerCard*cols) / cols
-	if w < 16 {
-		return 16
-	}
-	if w > 30 {
-		return 30
-	}
-	return w
+	return mutedStyle.Render(text)
 }
 
 func enabledClientCount(cfg gateway.ConfigSnapshot) int {
@@ -234,8 +178,6 @@ func menuIndex(v string) int {
 		return 3
 	case "5":
 		return 4
-	case "6":
-		return 5
 	default:
 		return -1
 	}
@@ -245,14 +187,68 @@ func truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= width {
+	if lipgloss.Width(s) <= width {
 		return s
 	}
 	if width == 1 {
-		return string(runes[:1])
+		return "…"
 	}
-	return string(runes[:width-1]) + "…"
+	target := width - 1
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if used+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String() + "…"
+}
+
+func padBetween(left, right string, width int) string {
+	if width <= 0 {
+		return left + " " + right
+	}
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return truncatePlainStyled(left, max(1, width-lipgloss.Width(right)-1)) + " " + right
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func truncatePlainStyled(s string, width int) string {
+	// Header inputs contain small ANSI-styled fragments. When space is tight,
+	// returning the left context unchanged is preferable to cutting escape
+	// sequences. Compact callers already keep the left side short.
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	return s
+}
+
+func sectionRule(title string, width int) string {
+	label := " " + title + " "
+	remaining := width - lipgloss.Width(label)
+	if remaining < 2 {
+		return subtitleStyle.Render(title)
+	}
+	return subtitleStyle.Render(label) + sectionRuleStyle.Render(strings.Repeat("─", remaining))
+}
+
+func kvRow(label, value string, labelWidth int) string {
+	if labelWidth < 8 {
+		labelWidth = 8
+	}
+	return labelStyle.Render(fmt.Sprintf("%-*s", labelWidth, label)) + " " + textStyle.Render(value)
+}
+
+func percent(numerator, denominator int) string {
+	if denominator <= 0 {
+		return "0.0%"
+	}
+	return fmt.Sprintf("%.1f%%", float64(numerator)/float64(denominator)*100)
 }
 
 func max(a, b int) int {

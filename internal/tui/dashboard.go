@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -11,49 +10,126 @@ import (
 func (m Model) dashboardView() string {
 	stats := summarize(m.logs)
 	w := m.contentWidth()
-	cols := responsiveColumns(w)
-	cardW := cardWidth(w, cols)
-	errorValue := fmt.Sprintf("%d", stats.FourXX+stats.FiveXX)
-	if stats.FiveXX > 0 {
-		errorValue = badStyle.Render(errorValue)
-	}
 
-	providerNote := fmt.Sprintf("%d configured", len(m.cfg.Providers))
-	if attention := providerAttentionCount(m.metrics.Providers, m.metrics.Circuits); attention > 0 {
-		providerNote = warnStyle.Render(fmt.Sprintf("%d need attention", attention))
-	}
-
-	cards := []string{
-		metricCard("Requests", fmt.Sprintf("%d", m.metrics.Requests), fmt.Sprintf("%d/min recent", stats.LastMinute), cardW),
-		metricCard("Success", fmt.Sprintf("%.1f%%", stats.SuccessRate), fmt.Sprintf("%d ok responses", stats.TwoXX), cardW),
-		metricCard("Errors", errorValue, fmt.Sprintf("%d 4xx / %d 5xx", stats.FourXX, stats.FiveXX), cardW),
-		metricCard("Latency", formatDuration(stats.P95Latency), "p95 recent", cardW),
-		metricCard("In-flight", fmt.Sprintf("%d", m.metrics.InFlight), "active gateway calls", cardW),
-		metricCard("Providers", fmt.Sprintf("%d", len(m.metrics.Providers)), providerNote, cardW),
-		metricCard("Rate limited", fmt.Sprintf("%d", m.metrics.RateLimited), "sliding-window 429s", cardW),
-		metricCard("Uptime", m.metrics.Uptime.Round(time.Second).String(), "since start", cardW),
-	}
-
-	trafficBlock := lipgloss.JoinVertical(lipgloss.Left,
-		subtitleStyle.Render("Traffic"),
-		stats.Trend,
-		mutedStyle.Render("last 20 minutes, each block is one minute"),
+	summary := m.overviewSummary(stats, w)
+	traffic := lipJoin(
+		sectionRule("Traffic", w),
+		fmt.Sprintf("%s  %s", valueStyle.Render(fmt.Sprintf("%d/min", stats.LastMinute)), stats.Trend),
+		mutedStyle.Render("rolling last 20 minutes; each cell is one minute"),
 	)
 
-	latest := textStyle.Render("No requests yet.")
-	if stats.Last.Status != 0 || stats.Last.Message != "" {
-		latest = strings.Join([]string{
-			textStyle.Render(fmt.Sprintf("%s %s %s", stats.Last.Time.Format("15:04:05"), coloredStatus(stats.Last.Status), logPath(stats.Last))),
-			mutedStyle.Render(fmt.Sprintf("client=%s  provider=%s  latency=%s  request_id=%s",
-				safeText(stats.Last.Client, "-"), safeText(stats.Last.Provider, "-"),
-				formatDuration(stats.Last.Duration), safeText(stats.Last.RequestID, "-"))),
-		}, "\n")
+	providers := lipJoin(
+		sectionRule("Provider state", w),
+		m.providerAttentionView(),
+	)
+
+	latest := lipJoin(
+		sectionRule("Latest request", w),
+		m.latestRequestView(stats),
+	)
+
+	if m.layout.IsWide() && w >= 96 {
+		leftW := (w * 58) / 100
+		rightW := max(32, w-leftW-3)
+		left := lipglossWidth(leftW, lipJoin(summary, "", traffic))
+		right := lipglossWidth(rightW, lipJoin(providers, "", latest))
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		boxStyle.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left, subtitleStyle.Render("Traffic overview"), "", cardGrid(cards, cols))),
-		boxStyle.Width(w).Render(trafficBlock),
-		boxStyle.Width(w).Render(subtitleStyle.Render("Provider health")+"\n"+providerHealthSummary(m.metrics.Providers)),
-		boxStyle.Width(w).Render(subtitleStyle.Render("Latest event")+"\n"+latest),
+	return lipJoin(summary, "", traffic, "", providers, "", latest)
+}
+
+func (m Model) overviewSummary(stats statsSnapshot, width int) string {
+	errors := stats.FourXX + stats.FiveXX
+	success := fmt.Sprintf("%.1f%%", stats.SuccessRate)
+	errorText := fmt.Sprintf("%d", errors)
+	if errors > 0 {
+		errorText = warnStyle.Render(errorText)
+	}
+	if stats.FiveXX > 0 || m.metrics.UpstreamErrors > 0 {
+		errorText = badStyle.Render(fmt.Sprintf("%d", errors))
+	}
+
+	items := []string{
+		metricInline("requests", valueStyle.Render(fmt.Sprintf("%d", m.metrics.Requests))),
+		metricInline("success", valueStyle.Render(success)),
+		metricInline("errors", errorText),
+		metricInline("p95", valueStyle.Render(formatDuration(stats.P95Latency))),
+		metricInline("in-flight", valueStyle.Render(fmt.Sprintf("%d", m.metrics.InFlight))),
+		metricInline("limited", valueStyle.Render(fmt.Sprintf("%d", m.metrics.RateLimited))),
+	}
+
+	if width < 72 {
+		return lipJoin(
+			sectionRule("Now", width),
+			strings.Join(items[:3], "   "),
+			strings.Join(items[3:], "   "),
+		)
+	}
+	return lipJoin(sectionRule("Now", width), strings.Join(items, "   "))
+}
+
+func metricInline(label, value string) string {
+	return mutedStyle.Render(label+" ") + value
+}
+
+func (m Model) providerAttentionView() string {
+	if len(m.cfg.Providers) == 0 {
+		return mutedStyle.Render("No providers configured.")
+	}
+
+	byName := providerMetricsByName(m.metrics.Providers)
+	circuits := providerCircuitsByName(m.metrics.Circuits)
+	lines := make([]string, 0, min(6, len(m.cfg.Providers)))
+
+	for _, p := range m.cfg.Providers {
+		pm := byName[p.Name]
+		circuit := circuits[p.Name]
+		if pm.Health != "warning" && pm.Health != "degraded" && circuit.State != "open" && circuit.State != "half_open" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("! %-18s %-10s circuit=%s",
+			truncate(p.Name, 18),
+			providerHealthText(pm.Health),
+			safeText(circuit.State, "closed"),
+		))
+		if len(lines) == 5 {
+			break
+		}
+	}
+
+	if len(lines) == 0 {
+		return okStyle.Render("OK  all configured providers are passive-healthy")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) latestRequestView(stats statsSnapshot) string {
+	e := stats.Last
+	if e.Status == 0 && e.Message == "" {
+		return mutedStyle.Render("No requests yet.")
+	}
+
+	line1 := fmt.Sprintf("%s  %s  %s",
+		e.Time.Format("15:04:05"),
+		coloredStatus(e.Status),
+		truncate(logPath(e), max(20, m.contentWidth()-24)),
 	)
+	line2 := fmt.Sprintf("client=%s  provider=%s  duration=%s",
+		safeText(e.Client, "-"),
+		safeText(e.Provider, "-"),
+		formatDuration(e.Duration),
+	)
+	if e.RequestID != "" && m.contentWidth() >= 90 {
+		line2 += "  request_id=" + e.RequestID
+	}
+	return textStyle.Render(line1) + "\n" + mutedStyle.Render(line2)
+}
+
+func lipJoin(parts ...string) string {
+	return strings.Join(parts, "\n")
+}
+
+func lipglossWidth(width int, content string) string {
+	return lipgloss.NewStyle().Width(max(1, width)).Render(content)
 }
