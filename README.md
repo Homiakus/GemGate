@@ -22,7 +22,7 @@ GemGate **не** обходит provider quota/billing/safety rules, **не** д
 - `/_healthz`, passive `/_readyz`, redacted `/_config`, Prometheus `/_metrics`;
 - metadata-only OpenTelemetry OTLP/HTTP tracing с privacy regression tests;
 - explicit trusted-proxy CIDR/IP model и configurable CORS;
-- provider-aware Charm TUI;
+- responsive keyboard-first Charm TUI;
 - strict YAML, race-tested CI, real Redis integration и forced Sentinel promotion E2E;
 - cross-platform release packaging, SHA-256, SPDX SBOM и GitHub artifact attestations.
 
@@ -266,14 +266,24 @@ Streaming accounting остаётся открытым до EOF/Close. Truncated
 
 ## TUI
 
-Views:
+TUI построен как terminal-first operator workspace, а не как набор декоративных dashboard-карточек. Основные разделы:
 
-1. **Overview** — traffic, latency, provider/circuit attention;
-2. **Logs** — client/provider/IP-aware request log;
-3. **Clients** — usage и RPM policy;
-4. **Providers** — health, circuit, requests, errors, duration;
-5. **Config** — redacted providers, Redis mode, CORS, operations auth и tracing state;
-6. **Help**.
+1. **Overview** — компактное текущее состояние: traffic, success/error, p95, in-flight, rate-limit events, provider attention и последний request;
+2. **Requests** — selectable request table, contextual filters и detail выбранного запроса;
+3. **Providers** — selectable master-detail view с passive health, circuit, error rate, latency и route/config context;
+4. **Clients** — selectable usage/RPM table с detail выбранного consumer;
+5. **Config** — scrollable redacted runtime/security view.
+
+`?` открывает контекстную справку поверх текущего раздела; отдельного Help-screen нет. `1-5` мгновенно переключают разделы, `Tab`/`]` и `Shift+Tab`/`[` переходят вперёд/назад, `Esc` возвращает в Overview, `q` завершает TUI. Request filters `a/w/e/u` активны только в Requests и не перехватывают ввод в остальных разделах.
+
+Responsive layout:
+
+- `>=118` колонок — navigation rail + workspace;
+- `80-117` — компактная horizontal section navigation + workspace;
+- `54-79` — single-pane compact mode с текущим разделом;
+- меньше `54×14` — явное состояние `Terminal too small`, без отрицательных widths/сломанных рамок.
+
+Requests/Providers/Clients скрывают вторичные колонки по breakpoint вместо горизонтального хаоса. Config и Help используют scrollable viewport. Terminal-width tests проверяют wide/medium/compact/minimum/tiny layouts, а Unicode tests проверяют display-width обрезку кириллицы и CJK.
 
 ## CI и releases
 
