@@ -55,13 +55,16 @@ var (
 				Bold(true).
 				Foreground(mutedColor)
 
+	// Full-width surfaces reserve their outer width in the layout calculation.
+	// Keep only a left inset here; symmetric horizontal padding adds one extra
+	// rendered cell at medium/compact widths in Lip Gloss v2.
 	headerStyle = lipgloss.NewStyle().
 			Foreground(foregroundColor).
-			Padding(0, 1)
+			PaddingLeft(1)
 
 	footerStyle = lipgloss.NewStyle().
 			Foreground(mutedColor).
-			Padding(0, 1)
+			PaddingLeft(1)
 
 	navigationStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
@@ -85,7 +88,7 @@ var (
 				Foreground(mutedColor)
 
 	workspaceStyle = lipgloss.NewStyle().
-			Padding(0, 1)
+			PaddingLeft(1)
 
 	sectionRuleStyle = lipgloss.NewStyle().
 				Foreground(borderColor)
@@ -122,8 +125,8 @@ var (
 			Bold(true).
 			Foreground(accentColor)
 
-	// Compatibility aliases kept intentionally small while older setup/views
-	// share the same package.
-	boxStyle  = workspaceStyle
+	// Setup and legacy helper views still expect symmetric padding. Keep that
+	// compatibility independent from the new full-width workspace styles.
+	boxStyle  = lipgloss.NewStyle().Padding(0, 1)
 	cardStyle = lipgloss.NewStyle()
 )
